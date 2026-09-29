@@ -1,0 +1,29 @@
+[Unit]
+Description=chassis_following FTP Server (pyftpdlib)
+Documentation=file:///home/naviai/chassis_following/FTP%20Server/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 部署路径（可通过 install_server.sh 修改）
+WorkingDirectory=/opt/chassis_following/ftp-server
+ExecStart=/usr/bin/python3 /opt/chassis_following/ftp-server/ftp_server.py \
+    --config /opt/chassis_following/ftp-server/server_config.json \
+    --log-file /var/log/chassis_following/ftp_server.log
+Restart=on-failure
+RestartSec=3
+# 非 root 运行，需在 /etc/passwd 中创建 ftpsrv 用户或改为当前用户
+User=naviai
+Group=naviai
+# 资源限制
+LimitNOFILE=65536
+# 安全加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/chassis_following/ftp-server/logs /var/log/chassis_following
+
+[Install]
+WantedBy=multi-user.target

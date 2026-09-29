@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>底盘扫拍</title>
+<style>
+  :root { color-scheme: light; --line: #d7dce3; --ink: #1c2430; --muted: #5c6b7a; --bg: #f4f6f8; --card: #fff; --accent: #0f6b4c; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.45 "Segoe UI", "Noto Sans SC", sans-serif; color: var(--ink); background: var(--bg); }
+  header { display: flex; justify-content: space-between; gap: 16px; align-items: center; padding: 16px 24px; background: #123; color: #fff; }
+  header h1 { margin: 0; font-size: 18px; font-weight: 650; }
+  header p { margin: 4px 0 0; color: #c5d0dc; font-size: 13px; }
+  .status { font-size: 13px; text-align: right; }
+  main { display: grid; grid-template-columns: 380px 1fr; gap: 16px; padding: 16px; align-items: start; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px 16px; }
+  h2 { margin: 0 0 10px; font-size: 16px; }
+  h3 { margin: 14px 0 8px; font-size: 13px; color: var(--muted); font-weight: 650; }
+  label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+  input, select, button { font: inherit; }
+  input, select { width: 100%; padding: 7px 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); background: #fff; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .grid.three { grid-template-columns: 1fr 1fr 1fr; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  button { border: 0; border-radius: 6px; padding: 8px 12px; background: var(--accent); color: #fff; cursor: pointer; }
+  button.ghost { background: #e8edf2; color: var(--ink); }
+  button.warn { background: #9a3412; }
+  button:disabled { opacity: 0.55; cursor: default; }
+  .msg { min-height: 1.2em; margin: 8px 0 0; font-size: 13px; color: var(--muted); }
+  .vehicle { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 8px; }
+  .chassis-map { width: 100%; height: auto; background: #f8fafc; border: 1px solid var(--line); border-radius: 8px; margin-top: 10px; }
+  .map-note { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { border-bottom: 1px solid var(--line); padding: 4px; text-align: left; }
+  td input, td select { padding: 4px 6px; }
+  .shots { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+  figure { margin: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #111; }
+  figure img { width: 100%; height: 160px; object-fit: contain; background: #111; display: block; }
+  figcaption { padding: 6px 8px; font-size: 12px; color: var(--muted); background: #fff; }
+  pre { white-space: pre-wrap; background: #111; color: #d5dece; border-radius: 8px; padding: 10px; max-height: 160px; overflow: auto; font-size: 12px; }
+  @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>底盘扫拍配置</h1>
+    <p>改配置后下一趟生效。模式 1、2 开扫时要带车型。</p>
+  </div>
+  <div class="status" id="status">正在连接…</div>
+</header>
+<main>
+  <div>
+    <section>
+      <h2>运行</h2>
+      <div class="grid">
+        <label>任务号 task_id<input id="task_id" placeholder="可空"/></label>
+        <label>车型 vehicle_type<select id="vehicle_type"></select></label>
+      </div>
+      <div class="row">
+        <button id="btn_node" type="button">启动检测节点</button>
+        <button id="btn_start" type="button">开始检测</button>
+        <button id="btn_stop" class="warn" type="button">停止</button>
+        <button id="btn_reset" class="ghost" type="button">复位回家</button>
+      </div>
+      <h3>手动拍照</h3>
+      <div class="row">
+        <button id="btn_cap_left" class="ghost" type="button">拍左腕</button>
+        <button id="btn_cap_right" class="ghost" type="button">拍右腕</button>
+        <button id="btn_cap_both" class="ghost" type="button">左右都拍</button>
+      </div>
+      <h3>光源</h3>
+      <div class="grid">
+        <label>通道
+          <select id="light_ch">
+            <option value="1">1</option>
+            <option value="2">2</option>
+          </select>
+        </label>
+        <label>亮度 0–255<input id="light_bri" inputmode="numeric" value="255"/></label>
+      </div>
+      <div class="row">
+        <button id="btn_light" class="ghost" type="button">设置光源</button>
+      </div>
+      <h3>示教</h3>
+      <div class="grid">
+        <label>部位 arm_type
+          <select id="teach_arm">
+            <option value="1">1 左手</option>
+            <option value="2">2 右手</option>
+            <option value="3">3 双手</option>
+            <option value="4">4 脖子</option>
+            <option value="8">8 腰</option>
+            <option value="15">15 全身</option>
+          </select>
+        </label>
+      </div>
+      <div class="row">
+        <button id="btn_teach_enter" class="ghost" type="button">进入示教</button>
+        <button id="btn_teach_exit" class="ghost" type="button">退出示教</button>
+      </div>
+      <p class="msg" id="run_msg"></p>
+      <pre id="sweep_log"></pre>
+    </section>
+    <section style="margin-top:16px">
+      <h2>扫拍参数</h2>
+      <div class="grid">
+        <label>模式 sweep_mode
+          <select id="sweep_mode">
+            <option value="0">0 定时到终点</option>
+            <option value="1">1 按检测点</option>
+            <option value="2">2 定时、超过车头结束</option>
+          </select>
+        </label>
+        <label>导航超时 秒<input id="nav_timeout" inputmode="decimal"/></label>
+        <label><input id="sweep_whole_body" type="checkbox" checked/> 模式 1 扫拍中调用 movej/whole_body</label>
+      </div>
+      <h3>回家 map_home / 终点 sweep_end</h3>
+      <div class="grid three">
+        <label>home x<input id="map_home_x" inputmode="decimal"/></label>
+        <label>home y<input id="map_home_y" inputmode="decimal"/></label>
+        <label>home 航向 °<input id="map_home_yaw_deg" inputmode="decimal"/></label>
+        <label>end x<input id="sweep_end_x" inputmode="decimal"/></label>
+        <label>end y<input id="sweep_end_y" inputmode="decimal"/></label>
+        <label>end 航向 °<input id="sweep_end_yaw_deg" inputmode="decimal"/></label>
+        <label>平面误差 米<input id="map_arrive_tol_xy" inputmode="decimal"/></label>
+        <label>航向误差 °<input id="map_arrive_tol_yaw_deg" inputmode="decimal"/></label>
+      </div>
+      <div class="row">
+        <button id="btn_odom_home" class="ghost" type="button">当前定位写入回家点</button>
+        <button id="btn_odom_sweep" class="ghost" type="button">当前定位写入扫拍终点</button>
+        <button type="button" data-save="nav">保存配置</button>
+      </div>
+      <p class="msg" id="msg_nav"></p>
+      <h3>定时拍照（模式 0、2）</h3>
+      <div class="grid three">
+        <label>起步距离 米<input id="sweep_photo_move_m" inputmode="decimal"/></label>
+        <label>首张延迟 秒<input id="sweep_photo_delay" inputmode="decimal"/></label>
+        <label>间隔 秒<input id="sweep_photo_period" inputmode="decimal"/></label>
+      </div>
+      <div class="row"><button type="button" data-save="photo">保存配置</button></div>
+      <p class="msg" id="msg_photo"></p>
+      <h3>相机</h3>
+      <div class="grid">
+        <label>右腕 IP<input id="qvps_right_host"/></label>
+        <label>左腕 IP<input id="qvps_left_host"/></label>
+        <label>右腕端口<input id="qvps_port" inputmode="numeric"/></label>
+        <label>左腕端口<input id="qvps_left_port" inputmode="numeric"/></label>
+        <label>右腕取图端口<input id="qvps_http_port" inputmode="numeric"/></label>
+        <label>左腕取图端口<input id="qvps_left_http_port" inputmode="numeric"/></label>
+        <label>右腕程序号<input id="qvps_program"/></label>
+        <label>左腕程序号<input id="qvps_left_program"/></label>
+        <label>超时 秒<input id="qvps_timeout" inputmode="decimal"/></label>
+        <label><input id="save_images" type="checkbox" checked/> 保存图片到本地</label>
+      </div>
+      <div class="row"><button type="button" data-save="camera">保存配置</button></div>
+      <p class="msg" id="msg_camera"></p>
+      <h3>车头（模式 1、2）</h3>
+      <div class="grid three">
+        <label>夹具倍率<input id="gripper_scale" inputmode="decimal"/></label>
+        <label>夹具偏移 米<input id="gripper_offset" inputmode="decimal"/></label>
+        <label>夹具超时 秒<input id="gripper_timeout" inputmode="decimal"/></label>
+        <label>定位超时 秒<input id="loc_timeout" inputmode="decimal"/></label>
+        <label>车头余量 米<input id="safety_margin" inputmode="decimal"/></label>
+        <label>再多走 米<input id="front_extra_m" inputmode="decimal"/></label>
+      </div>
+      <div class="row"><button type="button" data-save="front">保存配置</button></div>
+      <p class="msg" id="msg_front"></p>
+      <h3>充电点</h3>
+      <div class="grid three">
+        <label>x<input id="charge_x" inputmode="decimal"/></label>
+        <label>y<input id="charge_y" inputmode="decimal"/></label>
+        <label>航向 °<input id="charge_yaw_deg" inputmode="decimal"/></label>
+        <label>平面误差<input id="charge_arrive_tol_xy" inputmode="decimal"/></label>
+        <label>航向误差 °<input id="charge_arrive_tol_yaw_deg" inputmode="decimal"/></label>
+      </div>
+      <div class="row">
+        <button id="btn_odom_charge" class="ghost" type="button">当前定位写入充电点</button>
+        <button type="button" data-save="charge">保存配置</button>
+      </div>
+      <p class="msg" id="msg_charge"></p>
+    </section>
+  </div>
+  <div>
+    <section>
+      <h2>车型与检测点</h2>
+      <div id="vehicles"></div>
+      <div class="row">
+        <input id="new_vehicle" placeholder="新车型名，如 SUV_C" style="max-width:220px"/>
+        <button id="btn_add_vehicle" class="ghost" type="button">加车型</button>
+      </div>
+      <p class="msg" id="msg_vehicle"></p>
+    </section>
+    <section style="margin-top:16px">
+      <h2>拍摄照片</h2>
+      <label>这一趟
+        <select id="run_select"></select>
+      </label>
+      <div class="shots" id="shots"></div>
+    </section>
+  </div>
+</main>
+<script>
+const PARAM_IDS = [
+  "sweep_mode","nav_timeout","sweep_whole_body",
+  "map_home_x","map_home_y","map_home_yaw_deg",
+  "sweep_end_x","sweep_end_y","sweep_end_yaw_deg",
+  "map_arrive_tol_xy","map_arrive_tol_yaw_deg",
+  "sweep_photo_move_m","sweep_photo_delay","sweep_photo_period",
+  "qvps_right_host","qvps_left_host","qvps_port","qvps_left_port","qvps_program","qvps_left_program","qvps_http_port","qvps_left_http_port","qvps_timeout","save_images",
+  "gripper_scale","gripper_offset","gripper_timeout",
+  "loc_timeout","safety_margin","front_extra_m",
+  "charge_x","charge_y","charge_yaw_deg",
+  "charge_arrive_tol_xy","charge_arrive_tol_yaw_deg"
+];
+let vehicles = {};
+let runs = [];
+
+function val(id) {
+  const el = document.getElementById(id);
+  if (el && el.type === "checkbox") return el.checked ? "true" : "false";
+  return el.value;
+}
+function setv(id, value) {
+  const el = document.getElementById(id);
+  if (!el || value === undefined || value === null) return;
+  if (el.type === "checkbox") {
+    el.checked = value === true || value === "true" || value === 1 || value === "1";
+    return;
+  }
+  el.value = value;
+}
+
+async function api(path, body) {
+  const res = await fetch(path, body ? {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body)
+  } : undefined);
+  const data = await res.json();
+  if (!res.ok || data.ok === false) throw new Error(data.message || "请求失败");
+  return data;
+}
+
+function collectParams() {
+  const params = {};
+  PARAM_IDS.forEach(id => { params[id] = val(id); });
+  return params;
+}
+
+function collectVehiclesFromDom() {
+  const out = {};
+  document.querySelectorAll("[data-vehicle]").forEach(box => {
+    const name = box.dataset.vehicle;
+    const points = [];
+    box.querySelectorAll("tbody tr").forEach(tr => {
+      points.push({
+        id: tr.querySelector(".pid").value.trim(),
+        s: tr.querySelector(".ps").value,
+        enabled: tr.querySelector(".pen").checked,
+        tolerance: tr.querySelector(".ptol").value,
+        sides: tr.querySelector(".psides").value,
+        pose_t: tr.querySelector(".pt").value,
+        joints: tr.querySelector(".pjoints").value.trim()
+      });
+    });
+    out[name] = {
+      origin: "rear",
+      gripper_to_rear: box.querySelector(".rear").value,
+      gripper_to_front: box.querySelector(".front").value,
+      points
+    };
+  });
+  return out;
+}
+
+function renderVehicles() {
+  const root = document.getElementById("vehicles");
+  const select = document.getElementById("vehicle_type");
+  const current = select.value;
+  root.innerHTML = "";
+  select.innerHTML = '<option value="">模式 0 可空</option>';
+  Object.keys(vehicles).forEach(name => {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    select.appendChild(opt);
+    const model = vehicles[name];
+    const box = document.createElement("div");
+    box.className = "vehicle";
+    box.dataset.vehicle = name;
+    box.innerHTML = `
+      <h3>${name}</h3>
+      <div class="grid">
+        <label>夹具到车尾 米<input class="rear" value="${model.gripper_to_rear}"/></label>
+        <label>夹具到车头 米<input class="front" value="${model.gripper_to_front}"/></label>
+      </div>
+      <svg class="chassis-map" viewBox="0 0 640 180"></svg>
+      <p class="map-note">夹具放在 0。检测点在车尾 + s。虚线是车头再加余量和再多走，模式 1、2 过了这条线才结束。</p>
+      <table>
+        <thead><tr><th>点</th><th>s 米</th><th>窗口</th><th>手</th><th>启用</th><th>t 秒</th><th>全身关节</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="row">
+        <button type="button" class="ghost add-point">加检测点</button>
+        <button type="button" class="save-vehicle">保存配置</button>
+        <button type="button" class="ghost del-vehicle">删除车型</button>
+      </div>
+      <p class="msg vehicle-msg"></p>`;
+    const body = box.querySelector("tbody");
+    (model.points || []).forEach(point => body.appendChild(pointRow(point)));
+    box.querySelector(".add-point").onclick = () => {
+      body.appendChild(pointRow({id: "P" + String(body.children.length + 1).padStart(2, "0"), s: 0, tolerance: 0.15, sides: "both", enabled: true, pose_t: 3, joints: []}));
+      drawChassis(box);
+    };
+    box.addEventListener("input", () => drawChassis(box));
+    box.addEventListener("change", () => drawChassis(box));
+    drawChassis(box);
+    box.querySelector(".save-vehicle").onclick = () => saveVehicle(name, box);
+    box.querySelector(".del-vehicle").onclick = () => deleteVehicle(name);
+    root.appendChild(box);
+  });
+  if (current) select.value = current;
+}
+
+function drawChassis(box) {
+  const svg = box.querySelector(".chassis-map");
+  const rear = Number(box.querySelector(".rear").value);
+  const front = Number(box.querySelector(".front").value);
+  if (!isFinite(rear) || !isFinite(front)) {
+    svg.innerHTML = "";
+    return;
+  }
+  const points = [];
+  box.querySelectorAll("tbody tr").forEach(tr => {
+    const s = Number(tr.querySelector(".ps").value);
+    const tol = Number(tr.querySelector(".ptol").value);
+    if (!isFinite(s)) return;
+    points.push({
+      id: tr.querySelector(".pid").value.trim() || "?",
+      at: rear + s,
+      tol: isFinite(tol) ? Math.max(0, tol) : 0,
+      enabled: tr.querySelector(".pen").checked,
+      sides: tr.querySelector(".psides").value
+    });
+  });
+  const margin = Number(val("safety_margin")) || 0;
+  const extra = Number(val("front_extra_m")) || 0;
+  const stopAt = front + margin + extra;
+  let lo = Math.min(rear, front, 0, stopAt);
+  let hi = Math.max(rear, front, 0, stopAt);
+  points.forEach(p => {
+    lo = Math.min(lo, p.at - p.tol);
+    hi = Math.max(hi, p.at + p.tol);
+  });
+  const span = Math.max(hi - lo, 0.2);
+  lo -= span * 0.06;
+  hi += span * 0.06;
+  const W = 640;
+  const xOf = v => 28 + (v - lo) / (hi - lo) * 584;
+  const color = {both: "#0f6b4c", left: "#1d4ed8", right: "#b45309"};
+  const esc = text => String(text).replace(/[&<>"]/g, ch => (
+    {"&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;"}[ch]));
+  let body = "";
+  body += `<line x1="${xOf(lo)}" y1="92" x2="${xOf(hi)}" y2="92" stroke="#d7dce3"/>`;
+  body += `<rect x="${Math.min(xOf(rear), xOf(front))}" y="62" width="${Math.abs(xOf(front) - xOf(rear))}" height="60" rx="8" fill="#e8eef5" stroke="#5c6b7a"/>`;
+  body += `<line x1="${xOf(stopAt)}" y1="48" x2="${xOf(stopAt)}" y2="132" stroke="#9a3412" stroke-dasharray="4 3"/>`;
+  body += `<text x="${xOf(stopAt)}" y="44" text-anchor="middle" font-size="11" fill="#9a3412">结束</text>`;
+  body += `<line x1="${xOf(0)}" y1="52" x2="${xOf(0)}" y2="132" stroke="#123" stroke-width="2"/>`;
+  body += `<text x="${xOf(0)}" y="156" text-anchor="middle" font-size="11" fill="#123">夹具 0</text>`;
+  body += `<text x="${xOf(rear)}" y="54" text-anchor="middle" font-size="11" fill="#5c6b7a">车尾 ${rear}</text>`;
+  body += `<text x="${xOf(front)}" y="54" text-anchor="middle" font-size="11" fill="#5c6b7a">车头 ${front}</text>`;
+  body += `<text x="${(xOf(rear) + xOf(front)) / 2}" y="100" text-anchor="middle" font-size="12" fill="#1c2430">车长 ${(front - rear).toFixed(2)} 米</text>`;
+  points.forEach(p => {
+    const fill = p.enabled ? (color[p.sides] || color.both) : "#98a2b3";
+    if (p.tol > 0) {
+      body += `<rect x="${xOf(p.at - p.tol)}" y="70" width="${Math.max(2, xOf(p.at + p.tol) - xOf(p.at - p.tol))}" height="44" fill="${fill}" opacity="0.15"/>`;
+    }
+    body += `<circle cx="${xOf(p.at)}" cy="92" r="5" fill="${fill}"/>`;
+    body += `<text x="${xOf(p.at)}" y="28" text-anchor="middle" font-size="11" fill="${fill}">${esc(p.id)}</text>`;
+    body += `<text x="${xOf(p.at)}" y="42" text-anchor="middle" font-size="10" fill="${fill}">${p.at.toFixed(2)}</text>`;
+  });
+  svg.innerHTML = body;
+}
+
+function jointsText(point) {
+  const joints = point.joints;
+  if (!joints) return "";
+  if (Array.isArray(joints)) return joints.join(", ");
+  return String(joints);
+}
+
+function pointRow(point) {
+  const tr = document.createElement("tr");
+  const sides = point.sides || "both";
+  tr.innerHTML = `
+    <td><input class="pid" value="${point.id || ""}"/></td>
+    <td><input class="ps" value="${point.s}"/></td>
+    <td><input class="ptol" value="${point.tolerance}"/></td>
+    <td><select class="psides">
+      <option value="both">左右</option>
+      <option value="left">仅左</option>
+      <option value="right">仅右</option>
+    </select></td>
+    <td><input class="pen" type="checkbox" ${point.enabled ? "checked" : ""}/></td>
+    <td><input class="pt" value="${point.pose_t == null ? 3 : point.pose_t}" inputmode="decimal"/></td>
+    <td>
+      <input class="pjoints" value="${jointsText(point)}"/>
+      <button type="button" class="ghost fill-pose">姿态写入</button>
+    </td>
+    <td><button type="button" class="ghost del">删</button></td>`;
+  tr.querySelector(".psides").value = sides;
+  tr.querySelector(".del").onclick = () => tr.remove();
+  tr.querySelector(".fill-pose").onclick = () => fillPose(tr);
+  return tr;
+}
+
+async function fillPose(tr) {
+  const el = tr.closest(".vehicle").querySelector(".vehicle-msg");
+  el.textContent = "正在读关节…";
+  try {
+    const data = await api("/api/joints", {});
+    tr.querySelector(".pjoints").value = data.joints.join(", ");
+    el.textContent = "已填入 " + data.joints.length
+      + " 个关节。点本车型「保存配置」后写入文件";
+  } catch (err) { el.textContent = err.message; }
+}
+
+function renderShots() {
+  const select = document.getElementById("run_select");
+  const chosen = select.value;
+  select.innerHTML = "";
+  runs.forEach(run => {
+    const opt = document.createElement("option");
+    opt.value = run.name;
+    opt.textContent = run.name + "（" + run.files.length + " 张）";
+    select.appendChild(opt);
+  });
+  if (chosen && runs.some(run => run.name === chosen)) select.value = chosen;
+  const run = runs.find(item => item.name === select.value);
+  const box = document.getElementById("shots");
+  box.innerHTML = "";
+  if (!run) return;
+  run.files.forEach(name => {
+    const fig = document.createElement("figure");
+    const img = document.createElement("img");
+    img.src = "/shots/" + encodeURIComponent(run.name) + "/" + encodeURIComponent(name);
+    img.alt = name;
+    const cap = document.createElement("figcaption");
+    cap.textContent = name;
+    fig.appendChild(img);
+    fig.appendChild(cap);
+    box.appendChild(fig);
+  });
+}
+
+async function loadConfig() {
+  const data = await api("/api/config");
+  PARAM_IDS.forEach(id => setv(id, data.params[id]));
+  vehicles = data.vehicles || {};
+  renderVehicles();
+}
+
+async function refresh() {
+  try {
+    const st = await api("/api/status");
+    document.getElementById("status").textContent =
+      (st.node_up ? "节点在跑" : "节点未启动") +
+      (st.sweep_running ? " · 检测进行中" : "");
+    document.getElementById("sweep_log").textContent = st.sweep_log || "还没有检测输出";
+    const shot = await api("/api/shots");
+    runs = shot.runs || [];
+    renderShots();
+  } catch (err) {
+    document.getElementById("status").textContent = err.message;
+  }
+}
+
+const SAVE_BLOCKS = {
+  nav: ["sweep_mode", "nav_timeout", "sweep_whole_body", "map_home_x", "map_home_y", "map_home_yaw_deg",
+    "sweep_end_x", "sweep_end_y", "sweep_end_yaw_deg",
+    "map_arrive_tol_xy", "map_arrive_tol_yaw_deg"],
+  photo: ["sweep_photo_move_m", "sweep_photo_delay", "sweep_photo_period"],
+  camera: ["qvps_right_host", "qvps_left_host", "qvps_port", "qvps_left_port", "qvps_program", "qvps_left_program", "qvps_http_port", "qvps_left_http_port", "qvps_timeout", "save_images"],
+  front: ["gripper_scale", "gripper_offset", "gripper_timeout",
+    "loc_timeout", "safety_margin", "front_extra_m"],
+  charge: ["charge_x", "charge_y", "charge_yaw_deg",
+    "charge_arrive_tol_xy", "charge_arrive_tol_yaw_deg"]
+};
+
+async function saveBlock(name) {
+  const el = document.getElementById("msg_" + name);
+  el.textContent = "正在保存…";
+  try {
+    const params = {};
+    SAVE_BLOCKS[name].forEach(id => { params[id] = val(id); });
+    const data = await api("/api/config", {params: params});
+    el.textContent = data.message;
+  } catch (err) { el.textContent = err.message; }
+}
+
+["safety_margin", "front_extra_m"].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("input", () => {
+    document.querySelectorAll(".vehicle").forEach(drawChassis);
+  });
+});
+document.querySelectorAll("[data-save]").forEach(btn => {
+  btn.onclick = () => saveBlock(btn.dataset.save);
+});
+async function saveVehicle(name, box) {
+  const el = box.querySelector(".vehicle-msg");
+  el.textContent = "正在保存…";
+  try {
+    const model = collectVehiclesFromDom()[name];
+    const data = await api("/api/config", {vehicle: name, model: model});
+    vehicles[name] = model;
+    el.textContent = data.message;
+  } catch (err) { el.textContent = err.message; }
+}
+
+async function deleteVehicle(name) {
+  const el = document.getElementById("msg_vehicle");
+  el.textContent = "正在删除…";
+  try {
+    const data = await api("/api/config", {delete_vehicle: name});
+    vehicles = collectVehiclesFromDom();
+    delete vehicles[name];
+    renderVehicles();
+    document.getElementById("msg_vehicle").textContent = data.message;
+  } catch (err) { el.textContent = err.message; }
+}
+
+document.getElementById("btn_add_vehicle").onclick = () => {
+  const name = val("new_vehicle").trim();
+  if (!name) return;
+  vehicles = collectVehiclesFromDom();
+  vehicles[name] = {origin: "rear", gripper_to_rear: 0, gripper_to_front: 0, points: []};
+  renderVehicles();
+  document.getElementById("new_vehicle").value = "";
+};
+
+async function runAction(path, body, el) {
+  el.textContent = "…";
+  try {
+    const data = await api(path, body || {});
+    el.textContent = data.message;
+    refresh();
+  } catch (err) { el.textContent = err.message; }
+}
+
+document.getElementById("btn_node").onclick = () =>
+  runAction("/api/node/start", {}, document.getElementById("run_msg"));
+document.getElementById("btn_start").onclick = () =>
+  runAction("/api/sweep/start", {
+    task_id: val("task_id"),
+    vehicle_type: val("vehicle_type")
+  }, document.getElementById("run_msg"));
+document.getElementById("btn_stop").onclick = () =>
+  runAction("/api/sweep/stop", {}, document.getElementById("run_msg"));
+document.getElementById("btn_reset").onclick = () =>
+  runAction("/api/sweep/reset", {}, document.getElementById("run_msg"));
+document.getElementById("btn_cap_left").onclick = () =>
+  runAction("/api/capture", {side: "left"}, document.getElementById("run_msg"));
+document.getElementById("btn_cap_right").onclick = () =>
+  runAction("/api/capture", {side: "right"}, document.getElementById("run_msg"));
+document.getElementById("btn_cap_both").onclick = () =>
+  runAction("/api/capture", {side: "both"}, document.getElementById("run_msg"));
+document.getElementById("btn_light").onclick = () =>
+  runAction("/api/light", {
+    channel: val("light_ch"),
+    brightness: val("light_bri")
+  }, document.getElementById("run_msg"));
+document.getElementById("btn_teach_enter").onclick = () =>
+  runAction("/api/teach", {
+    action: "enter",
+    arm_type: val("teach_arm")
+  }, document.getElementById("run_msg"));
+document.getElementById("btn_teach_exit").onclick = () =>
+  runAction("/api/teach", {
+    action: "exit",
+    arm_type: val("teach_arm")
+  }, document.getElementById("run_msg"));
+
+function roundNum(n, digits) {
+  const p = Math.pow(10, digits);
+  return String(Math.round(Number(n) * p) / p);
+}
+
+async function writePose(ids, block) {
+  const el = document.getElementById("msg_" + block);
+  el.textContent = "正在读定位…";
+  try {
+    const pose = await api("/api/odom", {});
+    setv(ids[0], roundNum(pose.x, 3));
+    setv(ids[1], roundNum(pose.y, 3));
+    setv(ids[2], roundNum(pose.yaw_deg, 2));
+    el.textContent = "已填入 x=" + roundNum(pose.x, 3)
+      + " y=" + roundNum(pose.y, 3)
+      + " 航向=" + roundNum(pose.yaw_deg, 2) + "°。点本块「保存配置」后写入文件";
+  } catch (err) { el.textContent = err.message; }
+}
+
+document.getElementById("btn_odom_home").onclick = () => writePose(
+  ["map_home_x", "map_home_y", "map_home_yaw_deg"], "nav");
+document.getElementById("btn_odom_sweep").onclick = () => writePose(
+  ["sweep_end_x", "sweep_end_y", "sweep_end_yaw_deg"], "nav");
+document.getElementById("btn_odom_charge").onclick = () => writePose(
+  ["charge_x", "charge_y", "charge_yaw_deg"], "charge");
+document.getElementById("run_select").onchange = renderShots;
+
+loadConfig().then(refresh);
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

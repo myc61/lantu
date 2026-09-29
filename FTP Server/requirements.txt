@@ -1,0 +1,6 @@
+# chassis_following FTP 服务端依赖
+#
+# 客户端 (stress_test.py) 仅依赖 Python 3.8+ 标准库，无需安装任何第三方包。
+# 服务端依赖 pyftpdlib 提供 FTP 协议实现。
+
+pyftpdlib>=2.0,<3.0

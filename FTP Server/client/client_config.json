@@ -1,0 +1,35 @@
+{
+  "_comment": "chassis_following FTP 压测客户端默认配置。命令行参数优先覆盖本文件。",
+
+  "host": "192.168.1.100",
+  "port": 2121,
+  "user": "stress",
+  "password": "stress123",
+
+  "concurrency": 4,
+  "rounds": 3,
+  "files": 50,
+  "timeout": 30,
+  "log_level": "INFO",
+
+  "download": {
+    "remote_dir": "/",
+    "pattern": "*.jpg",
+    "work_dir": "/tmp/ftp_stress_dl"
+  },
+
+  "upload": {
+    "remote_dir": "/stress_uploads",
+    "size": "1M",
+    "payload": "random"
+  },
+
+  "fetch": {
+    "remote_dir": "/",
+    "pattern": "*.jpg",
+    "local_dir": "~/fetched_shots",
+    "skip_existing": true
+  },
+
+  "out_json": "/tmp/ftp_stress_report.json"
+}

@@ -1,0 +1,118 @@
+# 扫拍节点直接读本文件。相机、光源、充电节点仍由各自 launch 载入参数服务器。
+# 改完保存即可。扫拍参数在下一趟 run_sweep 或 IDLE 时重读，不用重启。
+
+# ---------- 腕部 QVPS 防错相机 ----------
+# 扫拍走 TCP（trigger_both 后台线程）。/chassis_following/capture 只给前端手动拍，避免扫拍占满服务。
+# rosservice call /chassis_following/capture "{left_path: '', right_path: '/tmp/right.jpg'}"
+capture_service: "/chassis_following/capture"   # 手动拍照服务名
+qvps_program: "PN-001"                         # 右腕报文，TCP 原文
+qvps_left_program: "1"                         # 左腕报文，TCP 原文
+qvps_port: 10008                               # 右腕 TCP 端口
+qvps_left_port: 5000                           # 左腕 TCP 端口
+qvps_timeout: 15.0                             # 等相机应答超时，秒
+qvps_http_port: 80                             # 右腕取图 HTTP 端口
+qvps_left_http_port: 8000                      # 左腕取图 HTTP 端口
+qvps_right_host: "192.168.217.51"              # 右腕相机 IP
+qvps_left_host: "192.168.217.52"               # 左腕相机 IP
+
+# ---------- 光源控制服务 ----------
+# rosservice call /chassis_following/light_control/set "channel: 1  brightness: 255"
+light_service: "/chassis_following/light_control/set"  # 光源服务名
+light_host: "192.168.217.2"                            # 光源控制器 IP
+light_port: 2000                                       # 光源控制器端口
+light_timeout: 3.0                                     # 单次通信超时，秒
+light_retries: 3                                       # 失败后重试次数，次
+
+# ---------- 控制频率 ----------
+rate: 10.0                                     # 状态机定时器频率，赫兹。10 表示每秒走 10 步
+
+# ---------- 扫拍模式（节点内部，上层任务不带这个字段） ----------
+# 0 = 定时拍照，导航到 sweep_end 结束。
+# 1 = 欧式距离，按检测点拍照；点全部完成且超过车头后结束。
+# 2 = 定时拍照，超过车头就结束。需要车型和夹具位置，车头算法同模式 1。
+sweep_mode: 1
+# 模式 1 扫拍中是否调用 movej/whole_body。false 不发开扫、拍照后和回举手的全身运动。
+# 节点启动时的举手不受这项控制。
+sweep_whole_body: false
+
+# ---------- 地图点与导航（与前端导航同一坐标系，单位米、度） ----------
+# 扫拍导航去 sweep_end，拍完导航回 map_home。全程不发手柄。
+map_odom_topic: "/zj_humanoid/navigation/odom_info"     # 地图定位话题
+nav_action: "/zj_humanoid/navigation/navigation"        # 导航 Action 名
+map_home_x: -1.471  # 回家点 x，米
+map_home_y: 2.126  # 回家点 y，米
+map_home_yaw_deg: -6.49  # 回家点航向，度
+map_arrive_tol_xy: 0.1  # 扫拍终点和回家的平面到位误差，米
+map_arrive_tol_yaw_deg: 5  # 扫拍终点和回家的航向到位误差，度
+nav_timeout: 90  # 单段导航超时，秒。扫拍、回家、去充电共用
+sweep_end_x: 2.431  # 扫拍终点 x，米。模式 0/1/2 都导航向这个点
+sweep_end_y: 1.736  # 扫拍终点 y，米
+sweep_end_yaw_deg: -5.99  # 扫拍终点航向，度
+# 下面三项只给模式 0 和模式 2 的定时拍照。模式 1 不读。
+sweep_photo_move_m: 0.1  # 离开本趟起点这么远才开始计时拍照，米
+sweep_photo_delay: 0.2  # 离开后再过这么久拍第 1 组，秒
+sweep_photo_period: 0.5  # 第 1 组之后每隔这么久再拍一组，秒。不是距离
+
+# ---------- 车头与检测点（模式 1、2 使用。模式 0 不读） ----------
+# 上游发布夹具 1D 位置。换算：gripper_s = scale * raw + offset，单位米。
+gripper_topic: "/chassis_following/gripper_s"  # 夹具位置话题，std_msgs/Float64
+gripper_scale: 1.0                             # 夹具原始值的倍率，无量纲
+gripper_offset: 0.0                            # 夹具原始值的偏移，米
+gripper_timeout: 1.0                           # 夹具数据超过这么久没更新视为无效，秒。模式 1 暂停触发拍照；模式 2 暂停判断车头。导航不停
+loc_timeout: 1.0                               # 地图定位超过这么久没更新则模式 1 暂停触发拍照，秒。导航不停
+safety_margin: 0.20                            # 超过车头后再加的余量，米。robot_s > gripper_s + gripper_to_front + 本值 才算超过车头
+front_extra_m: 0.30                            # 超过车头后再多走这段距离才结束扫拍，米。gripper_s 不准时用它兜底
+
+# ---------- 外部触发 ----------
+# 停止、复位是 Trigger 服务，请求体为 {}。
+# stop：取消导航，进入 STOP_HOLD。
+# reset：仅 STOP_HOLD 时导航回 home，到位后进 IDLE。
+# 自身避障：拍摄中速度曾非 0，又持续全 0 达到 obstacle_zero_hold_sec，任务失败并立刻导航回 home。到家后 safety_state=reset。
+cmd_vel_calib_topic: "/zj_humanoid/cmd_vel/calib"  # 自身避障速度话题，geometry_msgs/Twist
+obstacle_zero_hold_sec: 0.3                        # 速度全为 0 需持续这么久才判定避障，秒
+# 充电、结束充电是 Trigger 服务，请求体为 {}。
+# /chassis_following/charge、/chassis_following/end_charge
+
+# ---------- 举手（节点启动时按下面的关节角发一次 movej） ----------
+# 服务名和 arm_type=15 写在 arm.py。这里只改时间和关节角。改完重启节点。
+raise_time: 5.0                                # 举手运动时间，秒
+raise_joints: [                                # 全身关节目标角，弧度。顺序与 arm.py 的 MoveJ 一致
+ -0.0022410501196645782,
+ -0.40113598719472066,
+ 0.14629143749061768,
+ 0.02916960423135606,
+ -0.4536770477234996,
+  0.0015819177315279376,
+ 0.8351328979779057,
+ -0.06815126321309507,
+ -0.004026699680252932,
+ -0.5808634131017243,
+ -0.14429007187573006,
+ 0.019330555310261843,
+ -0.1643314715060342,
+ 0.19909393389298202,
+ 0.7318483952809348,
+ 0.2563173041958315,
+ -0.0003381094041395783,
+  0.00033615158516491503,
+  -0.6996151009934692,
+  -0.01634648322578869,
+  0.0002097239416798402,
+  0.7757628681611095
+]
+
+# ---------- 充电（状态机 NAV_CHARGE → CHARGING，结束充电后回 map_home） ----------
+# 也可单独：rosrun chassis_following run_charge.py / run_cancel_charge.py
+charge_action: "/zj_humanoid/navigation/navigation"   # 去充电用的导航 Action 名
+charge_service: "/zj_humanoid/chassis/agv_charge"     # 内部充电服务。请求字段 enable 为 true/false
+charge_x: 0.5                                         # 充电点 x，米
+charge_y: 1.7                                         # 充电点 y，米
+charge_yaw_deg: 90.0                                  # 充电点航向，度
+charge_arrive_tol_xy: 0.1                             # 充电点平面到位误差，米
+charge_arrive_tol_yaw_deg: 1                       # 充电点航向到位误差，度。约 0.1 弧度，与厂商示例一致
+charge_wait_server: 30.0                              # 独立充电脚本等待导航 Action 就绪的时间，秒
+
+# ---------- 拍照存盘 ----------
+retain_days: 7                                     # 日志和照片保留天数。更早的删除
+save_images: true                                # 是否把照片保存到本地。false 仍发检测，不取图、不写文件
+capture_dir: "/shared/catkin_ws/src/chassis_following/shots"  # 照片根目录。每趟在其下新建子目录

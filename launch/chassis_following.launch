@@ -1,0 +1,14 @@
+<launch>
+  <node pkg="chassis_following" type="qvps_camera_node.py"
+        name="qvps_camera_node" output="screen">
+    <rosparam file="$(find chassis_following)/config/chassis_following.yaml"
+              command="load"/>
+  </node>
+  <node pkg="chassis_following" type="light_control_node.py"
+        name="light_control_node" output="screen">
+    <rosparam file="$(find chassis_following)/config/chassis_following.yaml"
+              command="load"/>
+  </node>
+  <node pkg="chassis_following" type="chassis_following_node.py"
+        name="chassis_following_node" output="screen"/>
+</launch>

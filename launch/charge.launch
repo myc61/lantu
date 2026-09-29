@@ -1,0 +1,8 @@
+<launch>
+  <!-- 独立充电，不启动扫拍状态机 -->
+  <node pkg="chassis_following" type="run_charge.py"
+        name="run_charge" output="screen">
+    <rosparam file="$(find chassis_following)/config/chassis_following.yaml"
+              command="load"/>
+  </node>
+</launch>

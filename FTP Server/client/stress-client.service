@@ -1,0 +1,17 @@
+[Unit]
+Description=chassis_following FTP stress client (one-shot)
+Documentation=file://__PREFIX__/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__PREFIX__
+# 默认执行混合上下行压测；如需仅下行/仅上行，改这里的脚本名
+ExecStart=/usr/bin/env bash __PREFIX__/run_both.sh
+# 报告输出目录（可在 client_config.json 里改路径）
+StandardOutput=append:/var/log/chassis_following/stress-client.log
+StandardError=append:/var/log/chassis_following/stress-client.err.log
+# 超时保护，防止卡死
+TimeoutStartSec=30min

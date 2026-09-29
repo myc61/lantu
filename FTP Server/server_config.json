@@ -1,0 +1,32 @@
+{
+  "_comment": "chassis_following FTP 服务端配置示例。命令行参数会覆盖同名项。",
+  "host": "0.0.0.0",
+  "port": 2121,
+  "root": "../shots",
+  "anonymous": false,
+  "allow_upload": true,
+  "upload_root": "./uploads",
+  "upload_mount": "/stress_uploads",
+  "extra_mounts": {
+    "/Image_TEST": "./Image_TEST"
+  },
+  "max_conns": 64,
+  "stats_interval": 15,
+  "users": [
+    {
+      "username": "stress",
+      "password": "stress123",
+      "homedir": "../shots"
+    },
+    {
+      "username": "viewer",
+      "password": "viewer123",
+      "homedir": "../shots"
+    },
+    {
+      "username": "imagetest",
+      "password": "imagetest123",
+      "homedir": "./Image_TEST"
+    }
+  ]
+}

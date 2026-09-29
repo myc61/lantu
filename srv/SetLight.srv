@@ -1,0 +1,6 @@
+# 设置某一路光源亮度。channel 1/2，brightness 0-255。
+uint8 channel
+uint8 brightness
+---
+bool success
+string message

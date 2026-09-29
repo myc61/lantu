@@ -1,0 +1,11 @@
+# 左右腕同时触发一组拍照。路径留空则不拍那一侧。
+# 服务阻塞到 TCP/存盘结束call。
+string left_path
+string right_path
+---
+bool success
+string message
+bool left_ok
+bool right_ok
+string left_saved
+string right_saved

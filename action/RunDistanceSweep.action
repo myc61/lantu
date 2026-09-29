@@ -1,0 +1,14 @@
+# 扫拍任务。模式在 chassis_following.yaml 的 sweep_mode，上层不选。
+# sweep_mode=1 或 2 时用 task_id、vehicle_type；sweep_mode=0 时这两项可空。
+string task_id
+string vehicle_type
+---
+# 回到 map_home 之后的最终结果。success 表示回家到位。
+bool success
+string message
+---
+# 欧式距离每拍成一组发一次；三种模式在扫拍结束、开始回家时再发一次。此时还没到 home。
+bool sweep_ok
+string message
+uint32 shot_count
+string run_dir

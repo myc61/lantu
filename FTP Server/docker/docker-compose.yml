@@ -1,0 +1,63 @@
+# chassis_following FTP 测试容器
+#
+# ⚠️ 请统一用 ./ftp_docker.sh 操作，不要直接敲 docker compose。
+#   本机 shell 全局导出了 COMPOSE_PROJECT_NAME=navi_project（机器人栈用的），
+#   实测在 compose v5.1.4 下这个环境变量的优先级高于下面的 top-level name，
+#   直接跑 docker compose 会把本容器并进 navi_project 项目 ——
+#   届时一句 docker compose down --remove-orphans 就能把整套机器人容器带走。
+#   ftp_docker.sh 内部固定传 -p naviai-ftp-test（-p 优先级最高）来隔离。
+#   若一定要手敲，请自行带上: docker compose -p naviai-ftp-test ...
+#
+# 用法:
+#   ./ftp_docker.sh build|up|down|restart|status|logs|test|shell
+#
+# 网络模式为什么是 host:
+#   FTP 被动模式的数据通道要在 60000-60100 里动态开端口（ftp_server.py 内硬编码）。
+#   bridge 模式下要么逐个映射 101 个端口，要么 PASV 响应里回的是容器内网 IP，
+#   客户端根本连不上数据通道（就是之前踩过的 masquerade_address 那个坑）。
+#   host 模式一步到位: 容器直接共享宿主机网络栈，客户端连宿主机 IP 即可，
+#   也不需要配 masquerade_address。
+#   代价是没有网络隔离，且 2121 端口与宿主机直接跑 run_server.sh 互斥 —— 二者只能起一个。
+
+# 环境变量未设置 COMPOSE_PROJECT_NAME 时生效
+name: naviai-ftp-test
+
+services:
+  ftp-test:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-10.51.33.201:30002/navi_project/demos:v1.0.2}
+    image: naviai-ftp-test:local
+    container_name: naviai_ftp_test
+    restart: unless-stopped
+    network_mode: host
+
+    # 降权到宿主机普通用户运行，而不是默认的 root。
+    # 原因: 以 root 跑时，上传到 /stress_uploads 的文件落到宿主机 uploads/ 会变成
+    # root:root，naviai 账号自己都删不掉。降权后属主就是运行者。
+    # 可行性: shots/ 虽然属 root 但是 drwxr-xr-x + 文件 -rw-r--r--，全局可读；
+    #         uploads/ logs/ Image_TEST/ 本来就属 naviai；端口 2121 > 1024 不需特权。
+    # uid/gid 由 ftp_docker.sh 按当前用户自动注入，也可手动 FTP_UID=xxx 覆盖。
+    user: "${FTP_UID:-1000}:${FTP_GID:-1000}"
+
+    environment:
+      PYTHONUNBUFFERED: "1"
+      # 追加命令行参数，例如 "--anonymous"、"--log-level DEBUG"、"--port 2122"。
+      # 优先级是 命令行 > 配置文件 > 内置默认，所以这里传的值能盖掉
+      # server_config.docker.json 里的同名项（包括 port）。
+      FTP_EXTRA_ARGS: ${FTP_EXTRA_ARGS:-}
+      # 一旦用 FTP_EXTRA_ARGS 改了端口，必须同步设这个，
+      # 否则 healthcheck.py 仍按配置文件里的旧端口去探，容器会被误判 unhealthy。
+      FTP_HC_PORT: ${FTP_HC_PORT:-}
+
+    volumes:
+      # 代码 + 配置，只读。改完宿主机代码 docker restart 即生效，不用重新构建。
+      - ../:/app/ftp:ro
+      # 图片数据源。宿主机上属 root 只读，容器内以 root 运行照样能读。
+      - ../../shots:/app/shots:ro
+      # 下面两个是嵌套挂载，用 rw 覆盖上面 /app/ftp 的 ro：
+      # 上行文件落地目录（/stress_uploads 挂载点的真实后端）
+      - ../uploads:/app/ftp/uploads:rw
+      # 日志目录，容器日志写 ftp_server_docker.log，不与宿主机服务的日志混在一起
+      - ../logs:/app/ftp/logs:rw

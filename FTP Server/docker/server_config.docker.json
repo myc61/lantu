@@ -1,0 +1,33 @@
+{
+  "_comment": "Docker 测试容器专用配置。路径均为容器内绝对路径，不依赖相对解析。",
+  "_comment2": "优先级: 命令行显式参数 > 本配置文件 > ftp_server.py 内置默认。所以改端口可以直接改这里，也可以用 FTP_EXTRA_ARGS=\"--port 2122\" 临时覆盖；但后者需同时设 FTP_HC_PORT，否则健康检查会探错端口。",
+  "host": "0.0.0.0",
+  "port": 2121,
+  "root": "/app/shots",
+  "anonymous": false,
+  "allow_upload": true,
+  "upload_root": "/app/ftp/uploads",
+  "upload_mount": "/stress_uploads",
+  "extra_mounts": {
+    "/Image_TEST": "/app/ftp/Image_TEST"
+  },
+  "max_conns": 64,
+  "stats_interval": 15,
+  "users": [
+    {
+      "username": "stress",
+      "password": "stress123",
+      "homedir": "/app/shots"
+    },
+    {
+      "username": "viewer",
+      "password": "viewer123",
+      "homedir": "/app/shots"
+    },
+    {
+      "username": "imagetest",
+      "password": "imagetest123",
+      "homedir": "/app/ftp/Image_TEST"
+    }
+  ]
+}

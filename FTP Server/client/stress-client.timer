@@ -1,0 +1,13 @@
+[Unit]
+Description=Periodic trigger for chassis_following FTP stress client
+
+[Timer]
+# 每 30 分钟执行一次；可改为 OnCalendar=*-*-* 02:00:00 每天凌晨跑
+OnBootSec=2min
+OnUnitActiveSec=30min
+AccuracySec=1min
+Persistent=true
+Unit=stress-client.service
+
+[Install]
+WantedBy=timers.target
