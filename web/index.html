@@ -56,6 +56,7 @@
       <div class="grid">
         <label>任务号 task_id<input id="task_id" placeholder="可空"/></label>
         <label>车型 vehicle_type<select id="vehicle_type"></select></label>
+        <label>车尾速度 speed 米/秒<input id="speed" inputmode="decimal" value="0"/></label>
       </div>
       <div class="row">
         <button id="btn_node" type="button">启动检测节点</button>
@@ -216,6 +217,12 @@ const PARAM_IDS = [
 let vehicles = {};
 let runs = [];
 
+function showNum(value) {
+  const n = Number(value);
+  if (!isFinite(n)) return "";
+  return String(Number(n.toFixed(3)));
+}
+
 function val(id) {
   const el = document.getElementById(id);
   if (el && el.type === "checkbox") return el.checked ? "true" : "false";
@@ -266,8 +273,10 @@ function collectVehiclesFromDom() {
     });
     out[name] = {
       origin: "rear",
-      gripper_to_rear: box.querySelector(".rear").value,
-      gripper_to_front: box.querySelector(".front").value,
+      length: box.querySelector(".length").value,
+      fov: box.querySelector(".fov").value,
+      overlap: box.querySelector(".overlap").value,
+      overflow_end: box.querySelector(".overflow-end").value,
       points
     };
   });
@@ -289,32 +298,57 @@ function renderVehicles() {
     const box = document.createElement("div");
     box.className = "vehicle";
     box.dataset.vehicle = name;
+    const length = (model.length == null || model.length === "") ? 1 : model.length;
+    const fov = model.fov == null ? 1 : model.fov;
+    const overlap = model.overlap == null ? -0.1 : model.overlap;
+    const overflowEnd = model.overflow_end === "rear" ? "rear" : "front";
     box.innerHTML = `
       <h3>${name}</h3>
       <div class="grid">
-        <label>夹具到车尾 米<input class="rear" value="${model.gripper_to_rear}"/></label>
-        <label>夹具到车头 米<input class="front" value="${model.gripper_to_front}"/></label>
+        <label>车长 米<input class="length" value="${showNum(length)}" inputmode="decimal"/></label>
+        <label>相机视野 米<input class="fov" value="${showNum(fov)}" inputmode="decimal"/></label>
+        <label>前后重叠 米<input class="overlap" value="${showNum(overlap)}" inputmode="decimal"/></label>
+        <label>超出方向
+          <select class="overflow-end">
+            <option value="front">车头</option>
+            <option value="rear">车尾</option>
+          </select>
+        </label>
       </div>
-      <svg class="chassis-map" viewBox="0 0 640 180"></svg>
-      <p class="map-note">夹具放在 0。检测点在车尾 + s。虚线是车头再加余量和再多走，模式 1、2 过了这条线才结束。</p>
+      <svg class="chassis-map" viewBox="0 0 720 200"></svg>
+      <p class="map-note"></p>
       <table>
         <thead><tr><th>点</th><th>s 米</th><th>窗口</th><th>手</th><th>启用</th><th>t 秒</th><th>全身关节</th><th></th></tr></thead>
         <tbody></tbody>
       </table>
       <div class="row">
+        <button type="button" class="ghost gen-points">按车长生成检测点</button>
         <button type="button" class="ghost add-point">加检测点</button>
         <button type="button" class="save-vehicle">保存配置</button>
         <button type="button" class="ghost del-vehicle">删除车型</button>
       </div>
       <p class="msg vehicle-msg"></p>`;
+    box.querySelector(".overflow-end").value = overflowEnd;
     const body = box.querySelector("tbody");
     (model.points || []).forEach(point => body.appendChild(pointRow(point)));
     box.querySelector(".add-point").onclick = () => {
+      box.dataset.follow = "points";
       body.appendChild(pointRow({id: "P" + String(body.children.length + 1).padStart(2, "0"), s: 0, tolerance: 0.15, sides: "both", enabled: true, pose_t: 3, joints: []}));
       drawChassis(box);
     };
-    box.addEventListener("input", () => drawChassis(box));
-    box.addEventListener("change", () => drawChassis(box));
+    box.querySelector(".gen-points").onclick = () => generatePoints(box);
+    box.addEventListener("input", (ev) => {
+      const cls = ev.target.classList;
+      if (cls.contains("ps")) box.dataset.follow = "points";
+      if (cls.contains("length") || cls.contains("fov") || cls.contains("overlap")) {
+        box.dataset.follow = "plan";
+      }
+      drawChassis(box);
+    });
+    box.addEventListener("change", (ev) => {
+      if (ev.target.classList.contains("overflow-end")) box.dataset.follow = "plan";
+      drawChassis(box);
+    });
     drawChassis(box);
     box.querySelector(".save-vehicle").onclick = () => saveVehicle(name, box);
     box.querySelector(".del-vehicle").onclick = () => deleteVehicle(name);
@@ -323,64 +357,217 @@ function renderVehicles() {
   if (current) select.value = current;
 }
 
-function drawChassis(box) {
-  const svg = box.querySelector(".chassis-map");
-  const rear = Number(box.querySelector(".rear").value);
-  const front = Number(box.querySelector(".front").value);
-  if (!isFinite(rear) || !isFinite(front)) {
-    svg.innerHTML = "";
-    return;
+function planCenters(length, fov, overlap, end) {
+  if (!(length > 0) || !(fov > 0)) return {error: "车长和视野要大于 0"};
+  const step = fov + overlap;
+  if (!(step > 1e-6)) return {error: "视野加重叠距离要大于 0"};
+  const towardRear = end === "rear";
+  if (length <= fov) {
+    return {centers: [towardRear ? length - fov / 2 : fov / 2], step};
   }
+  const centers = [];
+  let center = fov / 2;
+  for (let guard = 0; guard < 10000; guard++) {
+    centers.push(center);
+    if (center + fov / 2 >= length - 1e-9) break;
+    center += step;
+  }
+  if (towardRear) {
+    const extra = centers[centers.length - 1] + fov / 2 - length;
+    for (let i = 0; i < centers.length; i++) centers[i] -= extra;
+  }
+  return {centers, step};
+}
+
+function readPointRows(box) {
   const points = [];
   box.querySelectorAll("tbody tr").forEach(tr => {
-    const s = Number(tr.querySelector(".ps").value);
-    const tol = Number(tr.querySelector(".ptol").value);
-    if (!isFinite(s)) return;
     points.push({
-      id: tr.querySelector(".pid").value.trim() || "?",
-      at: rear + s,
-      tol: isFinite(tol) ? Math.max(0, tol) : 0,
-      enabled: tr.querySelector(".pen").checked,
-      sides: tr.querySelector(".psides").value
+      tolerance: tr.querySelector(".ptol").value,
+      pose_t: tr.querySelector(".pt").value,
+      joints: tr.querySelector(".pjoints").value.trim()
     });
   });
-  const margin = Number(val("safety_margin")) || 0;
-  const extra = Number(val("front_extra_m")) || 0;
-  const stopAt = front + margin + extra;
-  let lo = Math.min(rear, front, 0, stopAt);
-  let hi = Math.max(rear, front, 0, stopAt);
-  points.forEach(p => {
-    lo = Math.min(lo, p.at - p.tol);
-    hi = Math.max(hi, p.at + p.tol);
+  return points;
+}
+
+function generatePoints(box) {
+  const el = box.querySelector(".vehicle-msg");
+  const length = Number(box.querySelector(".length").value);
+  const fov = Number(box.querySelector(".fov").value);
+  const overlap = Number(box.querySelector(".overlap").value);
+  const end = box.querySelector(".overflow-end").value;
+  const plan = planCenters(length, fov, overlap, end);
+  if (plan.error) {
+    el.textContent = plan.error;
+    drawChassis(box);
+    return;
+  }
+  const old = readPointRows(box);
+  const body = box.querySelector("tbody");
+  body.innerHTML = "";
+  box.dataset.follow = "points";
+  plan.centers.forEach((s, i) => {
+    const prev = old[i] || {};
+    body.appendChild(pointRow({
+      id: "P" + String(i + 1).padStart(2, "0"),
+      s: roundNum(s, 3),
+      tolerance: prev.tolerance == null || prev.tolerance === "" ? 0.15 : prev.tolerance,
+      sides: "both",
+      enabled: true,
+      pose_t: prev.pose_t == null || prev.pose_t === "" ? 3 : prev.pose_t,
+      joints: prev.joints || []
+    }));
   });
-  const span = Math.max(hi - lo, 0.2);
-  lo -= span * 0.06;
-  hi += span * 0.06;
-  const W = 640;
-  const xOf = v => 28 + (v - lo) / (hi - lo) * 584;
-  const color = {both: "#0f6b4c", left: "#1d4ed8", right: "#b45309"};
+  drawChassis(box);
+  el.textContent = "已生成 " + plan.centers.length
+    + " 个检测点，左右一起拍。点「保存配置」后写入文件";
+}
+
+function tableFrames(box) {
+  const frames = [];
+  box.querySelectorAll("tbody tr").forEach(tr => {
+    const s = Number(tr.querySelector(".ps").value);
+    if (!isFinite(s)) return;
+    frames.push({
+      id: tr.querySelector(".pid").value.trim() || "?",
+      s: s,
+      sides: tr.querySelector(".psides").value,
+      enabled: tr.querySelector(".pen").checked
+    });
+  });
+  frames.sort((a, b) => a.s - b.s);
+  return frames;
+}
+
+function fmtM(n) {
+  return (Math.round(n * 100) / 100).toFixed(2);
+}
+
+function drawChassis(box) {
+  const svg = box.querySelector(".chassis-map");
+  const note = box.querySelector(".map-note");
+  const length = Number(box.querySelector(".length").value);
+  const fov = Number(box.querySelector(".fov").value);
+  const overlap = Number(box.querySelector(".overlap").value);
+  const end = box.querySelector(".overflow-end").value;
+  const plan = planCenters(length, fov, overlap, end);
+  if (plan.error) {
+    svg.innerHTML = "";
+    note.textContent = plan.error;
+    return;
+  }
+  const table = tableFrames(box);
+  const followPoints = box.dataset.follow === "points" && table.length > 0;
+  const frames = followPoints
+    ? table
+    : plan.centers.map((s, i) => ({
+      id: "P" + String(i + 1).padStart(2, "0"),
+      s: s,
+      sides: "both",
+      enabled: true
+    }));
+  if (!frames.length) {
+    svg.innerHTML = "";
+    note.textContent = "填车长和视野后显示照片框";
+    return;
+  }
+  let lo = Math.min(0, ...frames.map(f => f.s - fov / 2));
+  let hi = Math.max(length, ...frames.map(f => f.s + fov / 2));
+  const pad = Math.max(hi - lo, 0.2) * 0.05;
+  lo -= pad;
+  hi += pad;
+  const xOf = v => 28 + (v - lo) / (hi - lo) * 664;
+  const wOf = meters => Math.max(1, meters / (hi - lo) * 664);
   const esc = text => String(text).replace(/[&<>"]/g, ch => (
     {"&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;"}[ch]));
+  const photoY = 36;
+  const photoH = 48;
+  const chassisY = 118;
   let body = "";
-  body += `<line x1="${xOf(lo)}" y1="92" x2="${xOf(hi)}" y2="92" stroke="#d7dce3"/>`;
-  body += `<rect x="${Math.min(xOf(rear), xOf(front))}" y="62" width="${Math.abs(xOf(front) - xOf(rear))}" height="60" rx="8" fill="#e8eef5" stroke="#5c6b7a"/>`;
-  body += `<line x1="${xOf(stopAt)}" y1="48" x2="${xOf(stopAt)}" y2="132" stroke="#9a3412" stroke-dasharray="4 3"/>`;
-  body += `<text x="${xOf(stopAt)}" y="44" text-anchor="middle" font-size="11" fill="#9a3412">结束</text>`;
-  body += `<line x1="${xOf(0)}" y1="52" x2="${xOf(0)}" y2="132" stroke="#123" stroke-width="2"/>`;
-  body += `<text x="${xOf(0)}" y="156" text-anchor="middle" font-size="11" fill="#123">夹具 0</text>`;
-  body += `<text x="${xOf(rear)}" y="54" text-anchor="middle" font-size="11" fill="#5c6b7a">车尾 ${rear}</text>`;
-  body += `<text x="${xOf(front)}" y="54" text-anchor="middle" font-size="11" fill="#5c6b7a">车头 ${front}</text>`;
-  body += `<text x="${(xOf(rear) + xOf(front)) / 2}" y="100" text-anchor="middle" font-size="12" fill="#1c2430">车长 ${(front - rear).toFixed(2)} 米</text>`;
-  points.forEach(p => {
-    const fill = p.enabled ? (color[p.sides] || color.both) : "#98a2b3";
-    if (p.tol > 0) {
-      body += `<rect x="${xOf(p.at - p.tol)}" y="70" width="${Math.max(2, xOf(p.at + p.tol) - xOf(p.at - p.tol))}" height="44" fill="${fill}" opacity="0.15"/>`;
+  let rightOver = 0;
+  let leftOver = 0;
+  frames.forEach(f => {
+    const a = f.s - fov / 2;
+    const b = f.s + fov / 2;
+    leftOver = Math.max(leftOver, Math.max(0, -a));
+    rightOver = Math.max(rightOver, Math.max(0, b - length));
+    const insideL = Math.max(a, 0);
+    const insideR = Math.min(b, length);
+    if (insideR - insideL > 1e-4) {
+      body += `<rect x="${xOf(insideL)}" y="${photoY}" width="${wOf(insideR - insideL)}" height="${photoH}" fill="#0f6b4c" opacity="0.28" stroke="#0f6b4c"/>`;
     }
-    body += `<circle cx="${xOf(p.at)}" cy="92" r="5" fill="${fill}"/>`;
-    body += `<text x="${xOf(p.at)}" y="28" text-anchor="middle" font-size="11" fill="${fill}">${esc(p.id)}</text>`;
-    body += `<text x="${xOf(p.at)}" y="42" text-anchor="middle" font-size="10" fill="${fill}">${p.at.toFixed(2)}</text>`;
+    if (a < -1e-4) {
+      const edge = Math.min(b, 0);
+      body += `<rect x="${xOf(a)}" y="${photoY}" width="${wOf(edge - a)}" height="${photoH}" fill="#b45309" opacity="0.55" stroke="#b45309"/>`;
+    }
+    if (b > length + 1e-4) {
+      const edge = Math.max(a, length);
+      body += `<rect x="${xOf(edge)}" y="${photoY}" width="${wOf(b - edge)}" height="${photoH}" fill="#b45309" opacity="0.55" stroke="#b45309"/>`;
+    }
+    body += `<line x1="${xOf(f.s)}" y1="${photoY}" x2="${xOf(f.s)}" y2="${chassisY + 36}" stroke="#0f6b4c" stroke-dasharray="2 2"/>`;
+    body += `<text x="${xOf(f.s)}" y="${photoY + 20}" text-anchor="middle" font-size="11" fill="#0f6b4c">${esc(f.id)}</text>`;
+    body += `<text x="${xOf(f.s)}" y="${photoY + 34}" text-anchor="middle" font-size="10" fill="#0f6b4c">${fmtM(fov)}m</text>`;
+  });
+  const overlaps = [];
+  for (let i = 0; i < frames.length - 1; i++) {
+    const amount = fov - (frames[i + 1].s - frames[i].s);
+    overlaps.push(amount);
+    const mid = (frames[i].s + frames[i + 1].s) / 2;
+    const label = amount >= -0.005
+      ? "重合 " + fmtM(Math.max(0, amount))
+      : "空隙 " + fmtM(-amount);
+    body += `<text x="${xOf(mid)}" y="16" text-anchor="middle" font-size="10" fill="${amount < -0.005 ? "#9a3412" : "#0f6b4c"}">${label}</text>`;
+    if (amount < -0.005) {
+      const gapL = frames[i].s + fov / 2;
+      const gapR = frames[i + 1].s - fov / 2;
+      body += `<rect x="${xOf(gapL)}" y="${chassisY}" width="${wOf(gapR - gapL)}" height="36" fill="#9a3412" opacity="0.35"/>`;
+    }
+  }
+  if (rightOver > 0.005) {
+    const end = Math.max(...frames.map(f => f.s + fov / 2));
+    body += `<text x="${xOf((length + end) / 2)}" y="${photoY - 6}" text-anchor="middle" font-size="11" fill="#b45309">超出车头 ${fmtM(rightOver)} 米</text>`;
+  }
+  if (leftOver > 0.005) {
+    const start = Math.min(...frames.map(f => f.s - fov / 2));
+    body += `<text x="${xOf(start / 2)}" y="${photoY - 6}" text-anchor="middle" font-size="11" fill="#b45309">超出车尾 ${fmtM(leftOver)} 米</text>`;
+  }
+  body += `<rect x="${xOf(0)}" y="${chassisY}" width="${wOf(length)}" height="36" rx="6" fill="#e8eef5" stroke="#5c6b7a"/>`;
+  body += `<text x="${xOf(length / 2)}" y="${chassisY + 23}" text-anchor="middle" font-size="12" fill="#1c2430">车长 ${fmtM(length)} 米</text>`;
+  body += `<text x="${xOf(0)}" y="${chassisY + 52}" text-anchor="middle" font-size="11" fill="#5c6b7a">车尾 0</text>`;
+  body += `<text x="${xOf(length)}" y="${chassisY + 52}" text-anchor="middle" font-size="11" fill="#5c6b7a">车头 ${fmtM(length)}</text>`;
+  const dots = followPoints ? frames : table;
+  dots.forEach(f => {
+    const fill = f.enabled === false
+      ? "#98a2b3"
+      : (f.sides === "left" ? "#1d4ed8" : f.sides === "right" ? "#b45309" : "#123");
+    body += `<circle cx="${xOf(f.s)}" cy="${chassisY + 18}" r="4" fill="${fill}"/>`;
   });
   svg.innerHTML = body;
+  const bits = [];
+  bits.push((followPoints ? "按检测点" : "按车长") + " " + frames.length
+    + " 张，每张 " + fmtM(fov) + " 米");
+  if (rightOver > 0.005) bits.push("超出车头 " + fmtM(rightOver) + " 米");
+  if (leftOver > 0.005) bits.push("超出车尾 " + fmtM(leftOver) + " 米");
+  if (overlaps.length) {
+    const same = overlaps.every(v => Math.abs(v - overlaps[0]) < 0.005);
+    if (same) {
+      if (overlaps[0] < -0.005) bits.push("相邻空隙 " + fmtM(-overlaps[0]) + " 米");
+      else bits.push("相邻重合 " + fmtM(Math.max(0, overlaps[0])) + " 米");
+    } else {
+      bits.push(overlaps.map((v, i) => frames[i].id + "-" + frames[i + 1].id
+        + (v < -0.005 ? " 空隙 " : " 重合 ") + fmtM(Math.abs(v)) + " 米").join("，"));
+    }
+  }
+  if (followPoints) {
+    bits.push("按检测点实际位置，车头车尾哪边伸出都照实显示");
+  } else if (table.length) {
+    bits.push("当前按" + (end === "rear" ? "车尾" : "车头")
+      + "超出预览。改检测点的 s 后改按实际位置");
+  } else {
+    bits.push("橙段是伸出车身的视野");
+  }
+  note.textContent = bits.join("。") + "。";
 }
 
 function jointsText(point) {
@@ -410,7 +597,12 @@ function pointRow(point) {
     </td>
     <td><button type="button" class="ghost del">删</button></td>`;
   tr.querySelector(".psides").value = sides;
-  tr.querySelector(".del").onclick = () => tr.remove();
+  tr.querySelector(".del").onclick = () => {
+    const vehicle = tr.closest(".vehicle");
+    if (vehicle) vehicle.dataset.follow = "points";
+    tr.remove();
+    if (vehicle) drawChassis(vehicle);
+  };
   tr.querySelector(".fill-pose").onclick = () => fillPose(tr);
   return tr;
 }
@@ -535,7 +727,10 @@ document.getElementById("btn_add_vehicle").onclick = () => {
   const name = val("new_vehicle").trim();
   if (!name) return;
   vehicles = collectVehiclesFromDom();
-  vehicles[name] = {origin: "rear", gripper_to_rear: 0, gripper_to_front: 0, points: []};
+  vehicles[name] = {
+    origin: "rear",
+    length: 4, fov: 1, overlap: -0.1, overflow_end: "front", points: []
+  };
   renderVehicles();
   document.getElementById("new_vehicle").value = "";
 };
@@ -554,7 +749,8 @@ document.getElementById("btn_node").onclick = () =>
 document.getElementById("btn_start").onclick = () =>
   runAction("/api/sweep/start", {
     task_id: val("task_id"),
-    vehicle_type: val("vehicle_type")
+    vehicle_type: val("vehicle_type"),
+    speed: val("speed")
   }, document.getElementById("run_msg"));
 document.getElementById("btn_stop").onclick = () =>
   runAction("/api/sweep/stop", {}, document.getElementById("run_msg"));

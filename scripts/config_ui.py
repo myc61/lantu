@@ -185,7 +185,6 @@ def _load_vehicles():
     models = data.get("vehicle_models") or {}
     out = {}
     for name, model in models.items():
-        geometry = (model or {}).get("geometry") or {}
         points = []
         for item in (model or {}).get("detection_points") or []:
             capture = item.get("capture") or {}
@@ -200,10 +199,18 @@ def _load_vehicles():
                 "pose_t": float(pose.get("t", 3.0)),
                 "joints": [float(x) for x in joints],
             })
+        layout = (model or {}).get("capture_layout") or {}
+        geometry = (model or {}).get("geometry") or {}
+        span = (
+            float(geometry.get("gripper_to_front", 0.0))
+            - float(geometry.get("gripper_to_rear", 0.0)))
         out[str(name)] = {
             "origin": str(((model or {}).get("reference") or {}).get("origin") or "rear"),
-            "gripper_to_rear": float(geometry.get("gripper_to_rear", 0.0)),
-            "gripper_to_front": float(geometry.get("gripper_to_front", 0.0)),
+            "length": _round_m(layout.get(
+                "length", span if span > 0 else 1.0)),
+            "fov": _round_m(layout.get("fov", 1.0)),
+            "overlap": _round_m(layout.get("overlap", -0.1)),
+            "overflow_end": "rear" if layout.get("overflow_end") == "rear" else "front",
             "points": points,
         }
     return out
@@ -222,6 +229,77 @@ def _parse_joints(value):
     return nums
 
 
+def _round_m(value):
+    text = ("%.6f" % float(value)).rstrip("0").rstrip(".")
+    return float(text if text not in ("", "-") else "0")
+
+
+def plan_photo_centers(length, fov, overlap, end="front"):
+    """沿车长排布照片中心，单位米，车尾为 0。
+
+    每张照片覆盖 [中心 - fov/2, 中心 + fov/2]。
+    overlap 为负表示相邻照片重叠，-0.1 就是重叠 0.1 米，中心间距为 fov + overlap。
+    end=front 时第一张贴住车尾，多出来的视野伸出车头。
+    end=rear 时最后一张贴住车头，多出来的视野伸出车尾。
+    """
+    length = float(length)
+    fov = float(fov)
+    overlap = float(overlap)
+    end = "rear" if end == "rear" else "front"
+    if not math.isfinite(length) or length <= 0:
+        raise ValueError("车长必须大于 0")
+    if not math.isfinite(fov) or fov <= 0:
+        raise ValueError("相机视野必须大于 0")
+    if not math.isfinite(overlap):
+        raise ValueError("重叠距离无效")
+    step = fov + overlap
+    if step <= 1e-6:
+        raise ValueError("视野加重叠距离必须大于 0")
+    if length <= fov:
+        center = (fov / 2.0) if end == "front" else (length - fov / 2.0)
+        return [center]
+    centers = []
+    center = fov / 2.0
+    guard = 0
+    while guard < 10000:
+        centers.append(center)
+        if center + fov / 2.0 >= length - 1e-9:
+            break
+        center += step
+        guard += 1
+    if end == "rear":
+        extra = centers[-1] + fov / 2.0 - length
+        centers = [c - extra for c in centers]
+    return centers
+
+
+def _apply_layout(model):
+    """补上车长、视野、重叠。缺省视野 1 米，重叠 -0.1 米。"""
+
+    def num(key, default):
+        raw = model.get(key, default)
+        if raw is None or raw == "":
+            raw = default
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            raise ValueError("%s 无效" % key)
+
+    length = num("length", 1.0)
+    fov = num("fov", 1.0)
+    overlap = num("overlap", -0.1)
+    length = _round_m(length)
+    fov = _round_m(fov)
+    overlap = _round_m(overlap)
+    end = "rear" if str(model.get("overflow_end") or "front") == "rear" else "front"
+    plan_photo_centers(length, fov, overlap, end)
+    model["length"] = length
+    model["fov"] = fov
+    model["overlap"] = overlap
+    model["overflow_end"] = end
+    return length, fov, overlap
+
+
 def _check_vehicles(models):
     if not isinstance(models, dict) or not models:
         raise ValueError("至少保留一个车型")
@@ -229,10 +307,9 @@ def _check_vehicles(models):
         if not re.match(r"^[A-Za-z0-9_]+$", str(name)):
             raise ValueError("车型名只能是字母、数字、下划线: %s" % name)
         try:
-            float(model["gripper_to_rear"])
-            float(model["gripper_to_front"])
-        except (KeyError, TypeError, ValueError):
-            raise ValueError("%s 的夹具距离无效" % name)
+            _apply_layout(model)
+        except ValueError as e:
+            raise ValueError("%s 的%s" % (name, e))
         seen = set()
         for point in model.get("points") or []:
             pid = str(point.get("id") or "").strip()
@@ -258,22 +335,26 @@ def _check_vehicles(models):
 
 def _dump_vehicles(models):
     lines = [
-        "# 车型几何和检测点。纵向单位都是米。\n",
-        "# 正负号由 gripper_to_rear / gripper_to_front 决定，代码不写死方向。\n",
-        "# 模式 1 用检测点；模式 2 只用 geometry 判断车头。\n",
+        "# 车型和检测点。纵向单位都是米。车长在 capture_layout.length。\n",
+        "# 模式 1 用检测点；模式 2 用车长判断车头。\n",
         "# capture.sides：both=左右都拍，left=只拍左腕，right=只拍右腕。不写则 both。\n",
         "# pose.joints：模式 1 全身 22 关节。不写则该点不发 movej。t 是运动时间，秒。is_async 固定 true。\n",
+        "# capture_layout：车长、相机视野、前后重叠、超出方向。重叠为负表示相邻照片重叠。\n",
+        "# overflow_end：front 多出的视野伸出车头，rear 伸出车尾。手动改过的检测点按实际位置。\n",
+        "# 检测点 s 是照片中心到车尾的距离。视野默认 1 米。\n",
         "vehicle_models:\n",
     ]
     for name, model in models.items():
         lines.append("\n  %s:\n" % name)
         lines.append("    reference:\n")
         lines.append("      origin: %s\n" % (model.get("origin") or "rear"))
-        lines.append("    geometry:\n")
-        lines.append("      gripper_to_rear: %s\n" % _format_value(
-            "gripper_to_rear", model["gripper_to_rear"]))
-        lines.append("      gripper_to_front: %s\n" % _format_value(
-            "gripper_to_front", model["gripper_to_front"]))
+        lines.append("    capture_layout:\n")
+        lines.append("      length: %s\n" % _format_value("length", model["length"]))
+        lines.append("      fov: %s\n" % _format_value("fov", model["fov"]))
+        lines.append("      overlap: %s\n" % _format_value(
+            "overlap", model["overlap"]))
+        lines.append("      overflow_end: %s\n" % (
+            "rear" if model.get("overflow_end") == "rear" else "front"))
         lines.append("    detection_points:\n")
         points = model.get("points") or []
         if not points:
@@ -464,7 +545,7 @@ def _start_node():
     return True, "已启动检测节点"
 
 
-def _start_sweep(task_id, vehicle_type):
+def _start_sweep(task_id, vehicle_type, speed):
     up, err = _node_up()
     if not up:
         return False, err or "检测节点没在跑，先启动节点"
@@ -472,16 +553,22 @@ def _start_sweep(task_id, vehicle_type):
         return False, "已有一趟检测在跑"
     task_id = re.sub(r"[^A-Za-z0-9_-]", "", task_id or "")
     vehicle_type = re.sub(r"[^A-Za-z0-9_]", "", vehicle_type or "")
+    try:
+        speed = float(speed)
+    except (TypeError, ValueError):
+        return False, "车尾速度必须是数字"
+    if not math.isfinite(speed):
+        return False, "车尾速度必须是有限数字"
     os.makedirs(os.path.dirname(SWEEP_LOG), exist_ok=True)
     script = (
         "nohup rosrun chassis_following run_sweep_client.py "
-        "_task_id:=\"'%s'\" _vehicle_type:=\"'%s'\" "
-        "> %s 2>&1 &" % (task_id, vehicle_type, SWEEP_LOG)
+        "_task_id:=\"'%s'\" _vehicle_type:=\"'%s'\" _speed:=%s "
+        "> %s 2>&1 &" % (task_id, vehicle_type, speed, SWEEP_LOG)
     )
     code, out = _run(_ros_bash(script), timeout=15)
     if code != 0:
         return False, out.strip() or "开扫失败"
-    return True, "已发送扫拍。模式 1、2 需要车型，并持续发夹爪位置"
+    return True, "已发送扫拍。模式 1、2 需要车型和车尾速度"
 
 
 def _odom_topic():
@@ -673,7 +760,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200 if ok else 400, {"ok": ok, "message": msg})
                 return
             if path == "/api/sweep/start":
-                ok, msg = _start_sweep(body.get("task_id", ""), body.get("vehicle_type", ""))
+                ok, msg = _start_sweep(
+                    body.get("task_id", ""), body.get("vehicle_type", ""),
+                    body.get("speed", 0.0))
                 self._json(200 if ok else 400, {"ok": ok, "message": msg})
                 return
             if path == "/api/sweep/stop":

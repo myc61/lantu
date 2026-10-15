@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """调一次 /chassis_following/run_sweep。扫完打印 feedback，到家后看 result。
 
-模式在节点 yaml 的 sweep_mode。模式 1、2 需要车型。
+模式在节点 yaml 的 sweep_mode。模式 1、2 需要车型和车尾速度。
 """
 import os
 import sys
@@ -28,6 +28,7 @@ def main():
     name = rospy.get_param("~action", "/chassis_following/run_sweep")
     task_id = str(rospy.get_param("~task_id", "") or "")
     vehicle_type = str(rospy.get_param("~vehicle_type", "") or "")
+    speed = float(rospy.get_param("~speed", 0.0))
     wait_s = float(rospy.get_param("~wait_server", 10.0))
     client = actionlib.SimpleActionClient(name, RunDistanceSweepAction)
     rospy.loginfo("等待动作 %s ...", name)
@@ -35,10 +36,10 @@ def main():
         rospy.logerr("动作没起来：%s（先 roslaunch chassis_following）", name)
         sys.exit(2)
     goal = RunDistanceSweepGoal(
-        task_id=task_id, vehicle_type=vehicle_type)
+        task_id=task_id, vehicle_type=vehicle_type, speed=speed)
     rospy.loginfo(
-        "已发送 车型=%s，扫完会有 feedback，到家后才有 result",
-        vehicle_type or "-")
+        "已发送 车型=%s 车尾速度=%.3f m/s，扫完会有 feedback，到家后才有 result",
+        vehicle_type or "-", speed)
     client.send_goal(goal, feedback_cb=_on_feedback)
     client.wait_for_result()
     state = client.get_state()

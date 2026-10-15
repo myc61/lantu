@@ -160,7 +160,7 @@ class FollowingMachine(object):
             log.info("[chassis_following] 开扫(%s)\n%s", why, self.plan_text)
             return True, "开始导航扫拍"
 
-    def start_front_sweep(self, task_id, vehicle_type):
+    def start_front_sweep(self, task_id, vehicle_type, speed, received_at):
         """定时扫拍，结束条件和欧式距离一样：超过车头就停拍并回家。"""
         with self._lock:
             if self.stop_requested() or self.state == "STOP_HOLD":
@@ -178,7 +178,8 @@ class FollowingMachine(object):
             pose = loc.pose()
             if pose is None:
                 return False, "地图定位还没有，不能开导航扫拍"
-            ok, msg = ctrl.begin(task_id, vehicle_type, pose[0], pose[1])
+            ok, msg = ctrl.begin(
+                task_id, vehicle_type, pose[0], pose[1], speed, received_at)
             if not ok:
                 return False, msg
             self.nav_client.cancel()
@@ -214,7 +215,7 @@ class FollowingMachine(object):
             log.info("[chassis_following] 开扫(超过车头结束)\n%s", text)
             return True, "开始导航扫拍，超过车头结束"
 
-    def start_distance_sweep(self, task_id, vehicle_type):
+    def start_distance_sweep(self, task_id, vehicle_type, speed, received_at):
         """欧式距离扫拍：导航去终点，按检测点窗口拍照，超过车头后再回家。"""
         with self._lock:
             if self.stop_requested() or self.state == "STOP_HOLD":
@@ -232,7 +233,8 @@ class FollowingMachine(object):
             pose = loc.pose()
             if pose is None:
                 return False, "地图定位还没有，不能开导航扫拍"
-            ok, msg = ctrl.begin(task_id, vehicle_type, pose[0], pose[1])
+            ok, msg = ctrl.begin(
+                task_id, vehicle_type, pose[0], pose[1], speed, received_at)
             if not ok:
                 return False, msg
             self.nav_client.cancel()

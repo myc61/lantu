@@ -113,7 +113,7 @@ def _past_vehicle_front(m, loc):
     passed = ctrl.past_vehicle_front(pose[0], pose[1])
     if passed is None:
         log.warn_throttle(
-            2.0, "[chassis_following] 夹具位置还不能判断车头，继续定时扫拍")
+            2.0, "[chassis_following] 车尾位置还不能判断车头，继续定时扫拍")
         return False
     if passed:
         log.info("[chassis_following] 已超过车头，结束定时扫拍并回家")

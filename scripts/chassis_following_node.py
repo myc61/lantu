@@ -279,15 +279,17 @@ class ChassisFollowingNode(object):
     def _execute_run_sweep(self, goal):
         """开扫。扫完发 feedback，回到 home 再 set_succeeded / set_aborted。"""
         self._load_yaml()
+        received = rospy.Time.now()
+        speed = float(goal.speed)
         mode = int(_cfg_get(self._cfg, "sweep_mode", 0))
         if mode == 0:
             ok, msg = self.machine.start_sweep("run_sweep")
         elif mode == 1:
             ok, msg = self.machine.start_distance_sweep(
-                goal.task_id or "", goal.vehicle_type or "")
+                goal.task_id or "", goal.vehicle_type or "", speed, received)
         elif mode == 2:
             ok, msg = self.machine.start_front_sweep(
-                goal.task_id or "", goal.vehicle_type or "")
+                goal.task_id or "", goal.vehicle_type or "", speed, received)
         else:
             self._as.set_aborted(self._sweep_result(
                 False,

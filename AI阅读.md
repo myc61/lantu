@@ -69,11 +69,11 @@ CHARGING 或 NAV_CHARGE
 |---|---|---|---|
 | 0 | `NAV_SWEEP` | 离开起点 `sweep_photo_move_m` 后，按 `sweep_photo_delay` / `sweep_photo_period` | 导航到 `sweep_end`，或导航失败 |
 | 1 | `NAV_DISTANCE` | `robot_s` 进入检测点窗口或穿过检测点 | 全部检测点完成且超过车头，或导航到终点，或导航失败 |
-| 2 | `NAV_SWEEP`（`end_on_front=True`） | 与模式 0 相同的定时拍照 | `robot_s > gripper_s + gripper_to_front + safety_margin + front_extra_m`。夹具超时先不结束。若先到 `sweep_end` 也会结束 |
+| 2 | `NAV_SWEEP`（`end_on_front=True`） | 与模式 0 相同的定时拍照 | `robot_s > front_s + safety_margin + front_extra_m`。`front_s = rear_s + 车长`。若先到 `sweep_end` 也会结束 |
 
-超过车头的公式模式 1 和模式 2 共用，实现在 `DistanceSweep.past_vehicle_front`。模式 1 还要求检测点已经没有剩余。`robot_s` 是相对本趟起点的平面距离。`front_extra_m` 是超过车头后再多走的距离，用来兜住 `gripper_s` 不准。车型几何和检测点在 `config/vehicle_models.yaml`。模式 0 不需要车型和夹具。模式 1、2 的 `vehicle_type` 必填，`task_id` 可空。
+超过车头的公式模式 1 和模式 2 共用，实现在 `DistanceSweep.past_vehicle_front`。模式 1 还要求检测点已经没有剩余。`robot_s` 是相对本趟起点的平面距离。车尾不订阅话题：接到任务时 `rear_s = 0`，之后 `rear_s = goal.speed * 已执行秒数`。检测点 `point_s = rear_s + point.s`。车头 `front_s = rear_s + 车长`，车长是该车型 `capture_layout.length`。`front_extra_m` 是超过车头后再多走的距离。车型几何和检测点在 `config/vehicle_models.yaml`。模式 0 不需要车型和速度。模式 1、2 的 `vehicle_type` 必填，`speed` 为车尾速度，`task_id` 可空。
 
-模式 1 的夹具或定位超时只暂停触发拍照，导航不停。模式 2 的夹具超时只是暂时不能判断车头。
+模式 1 的定位超时只暂停触发拍照，导航不停。
 
 ## 先读哪个文件
 
@@ -82,7 +82,7 @@ CHARGING 或 NAV_CHARGE
 | ROS 入口、action 等待、服务回调、yaml 重载 | `scripts/chassis_following_node.py` |
 | 状态切换、停止、复位、避障、feedback 队列 | `scripts/chassis_following/machine.py` |
 | 模式 0 和模式 2 的导航与定时拍照 | `scripts/chassis_following/states/nav_sweep.py` |
-| 模式 1 的检测点、车头判断、夹具订阅 | `scripts/chassis_following/distance_sweep.py` |
+| 模式 1 的检测点、车头判断、车尾积分 | `scripts/chassis_following/distance_sweep.py` |
 | 回家与 `safety_state=reset` 的置位 | `scripts/chassis_following/states/nav_return.py` |
 | 去充电点、到位后 `enable(True)` | `scripts/chassis_following/states/nav_charge.py` |
 | 充电中空等 `end_charge` | `scripts/chassis_following/states/charging.py` |

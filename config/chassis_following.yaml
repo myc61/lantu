@@ -29,7 +29,7 @@ rate: 10.0                                     # 状态机定时器频率，赫�
 # ---------- 扫拍模式（节点内部，上层任务不带这个字段） ----------
 # 0 = 定时拍照，导航到 sweep_end 结束。
 # 1 = 欧式距离，按检测点拍照；点全部完成且超过车头后结束。
-# 2 = 定时拍照，超过车头就结束。需要车型和夹具位置，车头算法同模式 1。
+# 2 = 定时拍照，超过车头就结束。需要车型和 goal 里的车尾速度，车头算法同模式 1。
 sweep_mode: 1
 # 模式 1 扫拍中是否调用 movej/whole_body。false 不发开扫、拍照后和回举手的全身运动。
 # 节点启动时的举手不受这项控制。
@@ -54,14 +54,16 @@ sweep_photo_delay: 0.2  # 离开后再过这么久拍第 1 组，秒
 sweep_photo_period: 0.5  # 第 1 组之后每隔这么久再拍一组，秒。不是距离
 
 # ---------- 车头与检测点（模式 1、2 使用。模式 0 不读） ----------
-# 上游发布夹具 1D 位置。换算：gripper_s = scale * raw + offset，单位米。
-gripper_topic: "/chassis_following/gripper_s"  # 夹具位置话题，std_msgs/Float64
-gripper_scale: 1.0                             # 夹具原始值的倍率，无量纲
-gripper_offset: 0.0                            # 夹具原始值的偏移，米
-gripper_timeout: 1.0                           # 夹具数据超过这么久没更新视为无效，秒。模式 1 暂停触发拍照；模式 2 暂停判断车头。导航不停
+# 车尾位置不再订阅话题。run_sweep 的 goal.speed 是车尾速度，米/秒。
+# 接到任务时 rear_s=0，执行中 rear_s = speed * 已执行秒数。
+# 下面四项仍留在文件里，扫拍节点不再读取、不再订阅。
+gripper_topic: "/chassis_following/gripper_s"  # 已停用
+gripper_scale: 1.0                             # 已停用
+gripper_offset: 0.0                            # 已停用
+gripper_timeout: 1.0                           # 已停用
 loc_timeout: 1.0                               # 地图定位超过这么久没更新则模式 1 暂停触发拍照，秒。导航不停
-safety_margin: 0.20                            # 超过车头后再加的余量，米。robot_s > gripper_s + gripper_to_front + 本值 才算超过车头
-front_extra_m: 0.30                            # 超过车头后再多走这段距离才结束扫拍，米。gripper_s 不准时用它兜底
+safety_margin: 0.20                            # 超过车头后再加的余量，米
+front_extra_m: 0.30                            # 超过车头后再多走这段距离才结束扫拍，米
 
 # ---------- 外部触发 ----------
 # 停止、复位是 Trigger 服务，请求体为 {}。

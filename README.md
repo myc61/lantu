@@ -52,7 +52,7 @@ IDLE 等 run_sweep
 rosrun chassis_following run_sweep_client.py
 # 模式在 config/chassis_following.yaml 的 sweep_mode
 # 0 定时到终点；1 欧式距离；2 定时、超过车头结束
-# 模式 1、2 再加：_task_id:=T001 _vehicle_type:=SUV_A
+# 模式 1、2 再加：_task_id:=T001 _vehicle_type:=SUV_A _speed:=0.2
 ```
 
 ## 接口
