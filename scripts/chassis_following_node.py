@@ -414,7 +414,7 @@ class ChassisFollowingNode(object):
         if prev != "IDLE" and self.machine.state == "IDLE":
             self._on_run_finished()
         log.info_throttle(
-            2.0,
+            60.0,
             "[chassis_following] state=%s capture=%d "
             "map_ready=%s stop=%s",
             self.machine.state,
