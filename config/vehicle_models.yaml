@@ -2,7 +2,8 @@
 # 模式 1 用检测点；模式 2 用车长判断车头。
 # capture.sides：both=左右都拍，left=只拍左腕，right=只拍右腕。不写则 both。
 # pose.joints：模式 1 全身 22 关节。不写则该点不发 movej。t 是运动时间，秒。is_async 固定 true。
-# capture_layout：车长、相机视野、前后重叠。重叠为负表示相邻照片重叠，-0.1 即重叠 0.1 米。
+# capture_layout：车长、相机视野、前后重叠、超出方向。重叠为负表示相邻照片重叠。
+# overflow_end：front 多出的视野伸出车头，rear 伸出车尾。手动改过的检测点按实际位置。
 # 检测点 s 是照片中心到车尾的距离。视野默认 1 米。
 vehicle_models:
 
@@ -13,6 +14,7 @@ vehicle_models:
       length: 5.4
       fov: 1
       overlap: -0.1
+      overflow_end: front
     detection_points:
       - id: P01
         position:
@@ -62,6 +64,7 @@ vehicle_models:
       length: 5.3
       fov: 1
       overlap: -0.1
+      overflow_end: front
     detection_points:
       - id: P01
         position:
@@ -77,7 +80,8 @@ vehicle_models:
     capture_layout:
       length: 4.5
       fov: 1
-      overlap: 0
+      overlap: -0.1
+      overflow_end: rear
     detection_points:
       - id: P01
         position:

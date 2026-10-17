@@ -5,11 +5,11 @@
 # 扫拍走 TCP（trigger_both 后台线程）。/chassis_following/capture 只给前端手动拍，避免扫拍占满服务。
 # rosservice call /chassis_following/capture "{left_path: '', right_path: '/tmp/right.jpg'}"
 capture_service: "/chassis_following/capture"   # 手动拍照服务名
-qvps_program: "PN-001"                         # 右腕报文，TCP 原文
-qvps_left_program: "1"                         # 左腕报文，TCP 原文
+qvps_program: "R-01"                         # 右腕报文，TCP 原文
+qvps_left_program: "L-01"                         # 左腕报文，TCP 原文
 qvps_port: 10008                               # 右腕 TCP 端口
 qvps_left_port: 5000                           # 左腕 TCP 端口
-qvps_timeout: 15.0                             # 等相机应答超时，秒
+qvps_timeout: 15                             # 等相机应答超时，秒
 qvps_http_port: 80                             # 右腕取图 HTTP 端口
 qvps_left_http_port: 8000                      # 左腕取图 HTTP 端口
 qvps_right_host: "192.168.217.51"              # 右腕相机 IP
@@ -28,9 +28,14 @@ rate: 10.0                                     # 状态机定时器频率，赫�
 
 # ---------- 扫拍模式（节点内部，上层任务不带这个字段） ----------
 # 0 = 定时拍照，导航到 sweep_end 结束。
-# 1 = 欧式距离，按检测点拍照；点全部完成且超过车头后结束。
-# 2 = 定时拍照，超过车头就结束。需要车型和 goal 里的车尾速度，车头算法同模式 1。
+# 1 = 欧式距离，按检测点拍照；点全部完成且超过本趟那一端后结束。
+# 2 = 定时拍照，超过本趟那一端就结束。需要车型和 goal 里的底盘速度。
+# 车尾开始时那一端是车头，车头开始时那一端是车尾。
 sweep_mode: 1
+# rear = 车尾开始，机器人和底盘同向，从车尾拍向车头。接到任务时机器人在车尾。
+# front = 车头开始，相向而行。接到任务时机器人在车头，从车头拍向车尾。
+# 只对模式 1、2 生效。模式 0 不读。
+sweep_from: "front"
 # 模式 1 扫拍中是否调用 movej/whole_body。false 不发开扫、拍照后和回举手的全身运动。
 # 节点启动时的举手不受这项控制。
 sweep_whole_body: false
@@ -54,16 +59,19 @@ sweep_photo_delay: 0.2  # 离开后再过这么久拍第 1 组，秒
 sweep_photo_period: 0.5  # 第 1 组之后每隔这么久再拍一组，秒。不是距离
 
 # ---------- 车头与检测点（模式 1、2 使用。模式 0 不读） ----------
-# 车尾位置不再订阅话题。run_sweep 的 goal.speed 是车尾速度，米/秒。
-# 接到任务时 rear_s=0，执行中 rear_s = speed * 已执行秒数。
+# 车尾位置不再订阅话题。run_sweep 的 goal.speed 是底盘速度，米/秒。
+# 停线时调用 /chassis_following/set_speed，data 传 true，从这一刻起把速度加载为 0。
+# 车身按新速度积分，已经走过的位置保留，扫拍继续按相对位置触发。
+# rear：接到任务时车尾 rear_s=0，之后沿机器人行走方向增加。
+# front：接到任务时车头在机器人脚下，车尾在前方 rear_s=车长，车身迎面而来，rear_s 减小。
 # 下面四项仍留在文件里，扫拍节点不再读取、不再订阅。
 gripper_topic: "/chassis_following/gripper_s"  # 已停用
 gripper_scale: 1.0                             # 已停用
 gripper_offset: 0.0                            # 已停用
 gripper_timeout: 1.0                           # 已停用
 loc_timeout: 1.0                               # 地图定位超过这么久没更新则模式 1 暂停触发拍照，秒。导航不停
-safety_margin: 0.20                            # 超过车头后再加的余量，米
-front_extra_m: 0.30                            # 超过车头后再多走这段距离才结束扫拍，米
+safety_margin: 0.20                            # 超过车端后再加的余量，米。rear 看车头，front 看车尾
+front_extra_m: 0.30                            # 超过车端后再多走这段距离才结束扫拍，米
 
 # ---------- 外部触发 ----------
 # 停止、复位是 Trigger 服务，请求体为 {}。

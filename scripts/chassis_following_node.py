@@ -5,6 +5,7 @@
   一整趟：action /chassis_following/run_sweep
   模式见 yaml sweep_mode：0=定时到终点，1=欧式距离，2=定时、超过车头结束
 """
+import json
 import math
 import os
 import sys
@@ -23,7 +24,7 @@ from chassis_following.runlog import log
 import yaml
 from geometry_msgs.msg import Twist
 from std_msgs.msg import String
-from std_srvs.srv import Trigger, TriggerResponse
+from std_srvs.srv import SetBool, SetBoolResponse, Trigger, TriggerResponse
 try:
     import rospkg
 except ImportError:
@@ -146,6 +147,8 @@ class ChassisFollowingNode(object):
             "/chassis_following/charge", Trigger, self._cb_charge)
         self._srv_end_charge = rospy.Service(
             "/chassis_following/end_charge", Trigger, self._cb_end_charge)
+        self._srv_set_speed = rospy.Service(
+            "/chassis_following/set_speed", SetBool, self._cb_set_speed)
         cmd_topic = _cfg_get(
             self._cfg, "cmd_vel_calib_topic", "/zj_humanoid/cmd_vel/calib")
         self._sub_cmd = rospy.Subscriber(
@@ -158,7 +161,8 @@ class ChassisFollowingNode(object):
             "[chassis_following] 外部接口 停=/chassis_following/stop "
             "复位=/chassis_following/reset "
             "充电=/chassis_following/charge "
-            "结束充电=/chassis_following/end_charge")
+            "结束充电=/chassis_following/end_charge "
+            "停线=/chassis_following/set_speed data:true 加载速度0")
         self._timer = rospy.Timer(rospy.Duration(1.0 / rate), self._loop)
         self._purge_at = 0.0
         self._purge_thread = None
@@ -400,6 +404,14 @@ class ChassisFollowingNode(object):
         self._purge_thread.daemon = True
         self._purge_thread.start()
 
+    def _cb_set_speed(self, req):
+        """停线。data 为 true 时把本趟底盘速度加载为 0，扫拍按相对位置继续。"""
+        if not req.data:
+            return SetBoolResponse(success=False, message="只有 true 才加载速度 0")
+        ok, msg = self.distance.set_speed(0.0)
+        log.info("[chassis_following] 停线 data=true success=%s %s", ok, msg)
+        return SetBoolResponse(success=ok, message=msg)
+
     def _cb_stop(self, _req):
         """外部停止：调用一次就取消导航，进入 STOP_HOLD。"""
         ok, msg = self.machine.request_stop()
@@ -412,6 +424,7 @@ class ChassisFollowingNode(object):
             self._reload_yaml_if_changed()
             self._maybe_purge()
         self.machine.step()
+        self._write_progress()
         self._publish_safety()
         if prev != "IDLE" and self.machine.state == "IDLE":
             self._on_run_finished()
@@ -423,6 +436,34 @@ class ChassisFollowingNode(object):
             self.machine.capture_count,
             self.map_loc.ready(),
             self.machine.stop_requested())
+
+    def _write_progress(self):
+        """把机器人和车身的相对位置写到照片目录，给配置页轮询。"""
+        now = time.time()
+        if now - getattr(self, "_progress_at", 0.0) < 0.25:
+            return
+        self._progress_at = now
+        ctrl = getattr(self, "distance", None)
+        if ctrl is None:
+            return
+        try:
+            data = ctrl.progress(self.machine)
+        except Exception as e:
+            log.warn_throttle(5.0, "[chassis_following] 进度计算失败: %s", e)
+            return
+        folder = getattr(self.machine, "capture_dir", "") or ""
+        if not folder:
+            return
+        try:
+            if not os.path.isdir(folder):
+                os.makedirs(folder)
+            path = os.path.join(folder, "live_progress.json")
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp, path)
+        except Exception as e:
+            log.warn_throttle(5.0, "[chassis_following] 写进度失败: %s", e)
 
     def shutdown(self):
         if self.nav_client is not None:

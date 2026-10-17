@@ -203,17 +203,18 @@ class FollowingMachine(object):
             self._reset_signal = False
             self.sweep_notes = []
             self.end_on_front = True
+            end_name = ctrl.vehicle_end_name()
             text = (
                 "定时扫拍  车型=%s  任务=%s  终点 map=(%.3f, %.3f, %.1fdeg)  "
-                "按间隔拍照，超过车头后回家"
+                "按间隔拍照，超过%s后回家"
                 % (vehicle_type, task_id or "-",
                    self.sweep_end_x, self.sweep_end_y,
-                   math.degrees(self.sweep_end_yaw)))
+                   math.degrees(self.sweep_end_yaw), end_name))
             self.set_plan({"mode": "nav_sweep"}, text)
             self.plan_text = text
             self.state = "NAV_SWEEP"
-            log.info("[chassis_following] 开扫(超过车头结束)\n%s", text)
-            return True, "开始导航扫拍，超过车头结束"
+            log.info("[chassis_following] 开扫(超过%s结束)\n%s", end_name, text)
+            return True, "开始导航扫拍，超过%s结束" % end_name
 
     def start_distance_sweep(self, task_id, vehicle_type, speed, received_at):
         """欧式距离扫拍：导航去终点，按检测点窗口拍照，超过车头后再回家。"""
@@ -258,12 +259,13 @@ class FollowingMachine(object):
             self._reset_signal = False
             self.sweep_notes = []
             self.end_on_front = False
+            end_name = ctrl.vehicle_end_name()
             text = (
                 "欧式距离扫拍  车型=%s  任务=%s  终点 map=(%.3f, %.3f, %.1fdeg)  "
-                "按检测点窗口拍照，全部完成且超过车头后回家"
+                "按检测点窗口拍照，全部完成且超过%s后回家"
                 % (vehicle_type, task_id or "-",
                    self.sweep_end_x, self.sweep_end_y,
-                   math.degrees(self.sweep_end_yaw)))
+                   math.degrees(self.sweep_end_yaw), end_name))
             self.set_plan({"mode": "nav_distance"}, text)
             self.plan_text = text
             self.state = "NAV_DISTANCE"
@@ -281,13 +283,20 @@ class FollowingMachine(object):
                self.sweep_photo_move_m,
                self.sweep_photo_delay, self.sweep_photo_period))
 
+    def _finish_distance(self):
+        ctrl = getattr(self, "distance", None)
+        if ctrl is not None:
+            ctrl.finish()
+
     def go_home(self, why="扫拍结束"):
         """导航回地图起点，等车头到位。扫拍阶段结束时先记下 feedback。"""
         if self.state in ("NAV_SWEEP", "NAV_DISTANCE"):
             ok = why in (
-                "扫拍终点到位", "欧式距离导航到位", "检测点完成且已超过车头",
-                "已超过车头")
+                "扫拍终点到位", "欧式距离导航到位",
+                "检测点完成且已超过车头", "已超过车头",
+                "检测点完成且已超过车尾", "已超过车尾")
             self._note_sweep_done(ok, why)
+            self._finish_distance()
         self._hush_capture()
         if self.nav_client is None:
             log.error("[chassis_following] 没有导航客户端，无法回家")
@@ -482,6 +491,8 @@ class FollowingMachine(object):
         self._cmd_moved = False
         self._cmd_zero_since = None
         self.state = "STOP_HOLD"
+        if prev in ("NAV_SWEEP", "NAV_DISTANCE"):
+            self._finish_distance()
         self._record_run_unlocked(False, reason)
         log.warn(
             "[chassis_following] 立即停车（%s，原状态 %s）", reason, prev)
@@ -562,6 +573,8 @@ class FollowingMachine(object):
         ok = self.wrist.trigger_both(left_path, right_path, sides)
         if not ok:
             return False
+        self.last_left_name = os.path.basename(left_path) if left_path else ""
+        self.last_right_name = os.path.basename(right_path) if right_path else ""
         self.last_shot_x = mx
         self.last_shot_y = my
         self.capture_count = n

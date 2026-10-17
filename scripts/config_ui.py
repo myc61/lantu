@@ -31,7 +31,7 @@ PORT = int(os.environ.get("CHASSIS_UI_PORT", "8090"))
 _write_lock = threading.Lock()
 
 PARAM_KEYS = [
-    "sweep_mode",
+    "sweep_mode", "sweep_from",
     "map_home_x", "map_home_y", "map_home_yaw_deg",
     "sweep_end_x", "sweep_end_y", "sweep_end_yaw_deg",
     "map_arrive_tol_xy", "map_arrive_tol_yaw_deg", "nav_timeout",
@@ -52,7 +52,7 @@ INT_KEYS = {
 BOOL_KEYS = {"save_images", "sweep_whole_body"}
 STR_KEYS = {
     "qvps_right_host", "qvps_left_host", "qvps_program",
-    "qvps_left_program", "capture_dir",
+    "qvps_left_program", "capture_dir", "sweep_from",
 }
 SIDES = {"both", "left", "right"}
 
@@ -169,6 +169,11 @@ def _save_params(params):
         raise ValueError("不能改这些字段: %s" % ", ".join(unknown))
     if "sweep_mode" in params and int(params["sweep_mode"]) not in (0, 1, 2):
         raise ValueError("sweep_mode 只能是 0、1、2")
+    if "sweep_from" in params:
+        origin = str(params["sweep_from"]).strip().lower()
+        if origin not in ("rear", "front"):
+            raise ValueError("sweep_from 只能是 rear 或 front")
+        params["sweep_from"] = origin
     text = _read(CFG_PATH)
     for key, value in params.items():
         if value is None or value == "":
@@ -516,6 +521,41 @@ def _tail(path, limit=40):
     return "".join(lines[-limit:])
 
 
+def _progress():
+    """读扫拍节点写下的相对位置。照片文件落地后才给出地址。"""
+    root = _shots_root()
+    path = os.path.join(root, "live_progress.json")
+    empty = {
+        "active": False, "state": "", "vehicle_type": "", "task_id": "",
+        "sweep_from": "", "length": None, "speed": None,
+        "robot_s": None, "rear_s": None,
+        "from_rear_m": None, "from_front_m": None,
+        "run": "", "points": [],
+    }
+    if not os.path.isfile(path):
+        return empty
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return empty
+    if not isinstance(data, dict):
+        return empty
+    run = str(data.get("run") or "")
+    points = data.get("points") if isinstance(data.get("points"), list) else []
+    for point in points:
+        if not isinstance(point, dict):
+            continue
+        for side in ("left", "right"):
+            name = str(point.get(side) or "")
+            if name and _safe_shot(run, name):
+                point[side + "_url"] = "/shots/%s/%s" % (run, name)
+            else:
+                point[side + "_url"] = ""
+    data["points"] = points
+    return data
+
+
 def _status():
     up, err = _node_up()
     root, runs = _list_shots()
@@ -680,6 +720,17 @@ def _call_trigger(service):
     return True, out.strip()
 
 
+def _call_line_stop():
+    """停线：std_srvs/SetBool data=true，扫拍节点把本趟速度加载为 0。"""
+    code, out = _run(_ros_bash(
+        'rosservice call /chassis_following/set_speed "data: true"'), timeout=20)
+    text = (out or "").strip()
+    if code != 0:
+        return False, text or "停线调用失败"
+    ok = "success: True" in text or "success: true" in text
+    return ok, text or "已发送停线"
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         return
@@ -709,6 +760,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/status":
             self._json(200, _status())
+            return
+        if path == "/api/progress":
+            self._json(200, _progress())
             return
         if path == "/api/shots":
             root, runs = _list_shots()
@@ -767,6 +821,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path == "/api/sweep/stop":
                 ok, msg = _call_trigger("/chassis_following/stop")
+                self._json(200 if ok else 400, {"ok": ok, "message": msg})
+                return
+            if path == "/api/sweep/line_stop":
+                ok, msg = _call_line_stop()
                 self._json(200 if ok else 400, {"ok": ok, "message": msg})
                 return
             if path == "/api/sweep/reset":

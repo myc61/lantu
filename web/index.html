@@ -33,6 +33,14 @@
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { border-bottom: 1px solid var(--line); padding: 4px; text-align: left; }
   td input, td select { padding: 4px 6px; }
+  .live-track { width: 100%; height: 92px; background: #f8fafc; border: 1px solid var(--line); border-radius: 8px; }
+  .live-points { display: flex; gap: 8px; margin-top: 12px; overflow-x: auto; padding-bottom: 4px; }
+  .live-point { flex: 0 0 148px; display: flex; flex-direction: column; gap: 6px; }
+  .live-point img, .live-point .ph { width: 100%; height: 96px; object-fit: contain; background: #111; border-radius: 6px; display: block; }
+  .live-point .ph { display: grid; place-items: center; background: #eef2f6; color: var(--muted); font-size: 12px; }
+  .live-cap { font-size: 11px; color: var(--muted); text-align: center; }
+  .live-meta { text-align: center; font-size: 12px; color: var(--muted); }
+  .live-meta strong { display: block; color: var(--ink); font-size: 14px; }
   .shots { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
   figure { margin: 0; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #111; }
   figure img { width: 100%; height: 160px; object-fit: contain; background: #111; display: block; }
@@ -62,6 +70,7 @@
         <button id="btn_node" type="button">启动检测节点</button>
         <button id="btn_start" type="button">开始检测</button>
         <button id="btn_stop" class="warn" type="button">停止</button>
+        <button id="btn_line_stop" class="ghost" type="button">停线</button>
         <button id="btn_reset" class="ghost" type="button">复位回家</button>
       </div>
       <h3>手动拍照</h3>
@@ -110,7 +119,13 @@
           <select id="sweep_mode">
             <option value="0">0 定时到终点</option>
             <option value="1">1 按检测点</option>
-            <option value="2">2 定时、超过车头结束</option>
+            <option value="2">2 定时、超过车端结束</option>
+          </select>
+        </label>
+        <label>起点 sweep_from
+          <select id="sweep_from">
+            <option value="rear">rear 车尾开始，同向拍向车头</option>
+            <option value="front">front 车头开始，相向拍向车尾</option>
           </select>
         </label>
         <label>导航超时 秒<input id="nav_timeout" inputmode="decimal"/></label>
@@ -184,6 +199,13 @@
   </div>
   <div>
     <section>
+      <h2>实时进度</h2>
+      <p class="msg" id="live_summary">还没有扫拍进度</p>
+      <svg class="live-track" id="live_track" viewBox="0 0 760 92"></svg>
+      <p class="map-note">车身从左到右是车尾到车头。每个检测点上面是左腕，下面是右腕。</p>
+      <div class="live-points" id="live_points"></div>
+    </section>
+    <section style="margin-top:16px">
       <h2>车型与检测点</h2>
       <div id="vehicles"></div>
       <div class="row">
@@ -203,7 +225,7 @@
 </main>
 <script>
 const PARAM_IDS = [
-  "sweep_mode","nav_timeout","sweep_whole_body",
+  "sweep_mode","sweep_from","nav_timeout","sweep_whole_body",
   "map_home_x","map_home_y","map_home_yaw_deg",
   "sweep_end_x","sweep_end_y","sweep_end_yaw_deg",
   "map_arrive_tol_xy","map_arrive_tol_yaw_deg",
@@ -669,7 +691,7 @@ async function refresh() {
 }
 
 const SAVE_BLOCKS = {
-  nav: ["sweep_mode", "nav_timeout", "sweep_whole_body", "map_home_x", "map_home_y", "map_home_yaw_deg",
+  nav: ["sweep_mode", "sweep_from", "nav_timeout", "sweep_whole_body", "map_home_x", "map_home_y", "map_home_yaw_deg",
     "sweep_end_x", "sweep_end_y", "sweep_end_yaw_deg",
     "map_arrive_tol_xy", "map_arrive_tol_yaw_deg"],
   photo: ["sweep_photo_move_m", "sweep_photo_delay", "sweep_photo_period"],
@@ -754,6 +776,8 @@ document.getElementById("btn_start").onclick = () =>
   }, document.getElementById("run_msg"));
 document.getElementById("btn_stop").onclick = () =>
   runAction("/api/sweep/stop", {}, document.getElementById("run_msg"));
+document.getElementById("btn_line_stop").onclick = () =>
+  runAction("/api/sweep/line_stop", {}, document.getElementById("run_msg"));
 document.getElementById("btn_reset").onclick = () =>
   runAction("/api/sweep/reset", {}, document.getElementById("run_msg"));
 document.getElementById("btn_cap_left").onclick = () =>
@@ -805,8 +829,112 @@ document.getElementById("btn_odom_charge").onclick = () => writePose(
   ["charge_x", "charge_y", "charge_yaw_deg"], "charge");
 document.getElementById("run_select").onchange = renderShots;
 
+function fmtLive(n) {
+  const x = Number(n);
+  if (!isFinite(x)) return "—";
+  return x.toFixed(2);
+}
+
+function liveState(state) {
+  return ({
+    WAITING: "待拍",
+    TRIGGERED: "已触发",
+    DONE: "已拍",
+    IDLE: "待命",
+    NAV_DISTANCE: "扫拍中",
+    NAV_SWEEP: "扫拍中",
+    NAV_RETURN: "回家",
+    STOP_HOLD: "已停止"
+  })[state] || state || "—";
+}
+
+let livePointSig = "";
+
+function drawLiveTrack(data) {
+  const svg = document.getElementById("live_track");
+  const length = Number(data.length);
+  const along = Number(data.from_rear_m);
+  if (!(length > 0)) {
+    svg.innerHTML = "";
+    return;
+  }
+  const pad = 28;
+  const width = 760 - pad * 2;
+  const xOf = v => pad + Math.max(0, Math.min(length, v)) / length * width;
+  let body = "";
+  body += `<rect x="${xOf(0)}" y="34" width="${Math.max(1, xOf(length) - xOf(0))}" height="28" rx="6" fill="#e8eef5" stroke="#5c6b7a"/>`;
+  body += `<text x="${xOf(0)}" y="78" text-anchor="middle" font-size="11" fill="#5c6b7a">车尾</text>`;
+  body += `<text x="${xOf(length)}" y="78" text-anchor="middle" font-size="11" fill="#5c6b7a">车头</text>`;
+  (data.points || []).forEach(point => {
+    if (point.enabled === false) return;
+    const s = Number(point.s);
+    if (!isFinite(s)) return;
+    const done = point.state === "DONE" || point.state === "TRIGGERED";
+    body += `<line x1="${xOf(s)}" y1="28" x2="${xOf(s)}" y2="62" stroke="${done ? "#0f6b4c" : "#98a2b3"}"/>`;
+    body += `<text x="${xOf(s)}" y="22" text-anchor="middle" font-size="10" fill="#1c2430">${point.id || ""}</text>`;
+  });
+  if (isFinite(along)) {
+    const x = xOf(along);
+    body += `<circle cx="${x}" cy="48" r="7" fill="#9a3412"/>`;
+    body += `<text x="${x}" y="14" text-anchor="middle" font-size="11" fill="#9a3412">机器人</text>`;
+  }
+  svg.innerHTML = body;
+}
+
+function photoCell(url, waiting) {
+  if (url) return `<img src="${url}" alt=""/>`;
+  return `<div class="ph">${waiting ? "传图中" : "未拍"}</div>`;
+}
+
+function renderProgress(data) {
+  data = data || {};
+  const summary = document.getElementById("live_summary");
+  const vehicle = data.vehicle_type || "未开始";
+  const moving = data.active ? "进行中" : (data.vehicle_type ? "已结束" : "未开始");
+  summary.textContent = "车型 " + vehicle
+    + " · " + moving
+    + " · " + liveState(data.state)
+    + " · 距车尾 " + fmtLive(data.from_rear_m) + " 米"
+    + " · 距车头 " + fmtLive(data.from_front_m) + " 米"
+    + " · 车身速度 " + fmtLive(data.speed) + " 米/秒";
+  drawLiveTrack(data);
+  const points = (data.points || []).filter(point => point.enabled !== false)
+    .slice().sort((a, b) => Number(a.s) - Number(b.s));
+  const sig = JSON.stringify(points.map(point => [
+    point.id, point.state, point.left_url || "", point.right_url || "", point.s
+  ]));
+  if (sig === livePointSig) return;
+  livePointSig = sig;
+  const box = document.getElementById("live_points");
+  box.innerHTML = "";
+  const esc = text => String(text == null ? "" : text).replace(/[&<>"]/g, ch => (
+    {"&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;"}[ch]));
+  points.forEach(point => {
+    const row = document.createElement("div");
+    row.className = "live-point";
+    const shot = point.state === "DONE" || point.state === "TRIGGERED";
+    const wantLeft = !point.sides || point.sides.indexOf("left") >= 0;
+    const wantRight = !point.sides || point.sides.indexOf("right") >= 0;
+    row.innerHTML = `<div class="live-cap">左腕</div>`
+      + photoCell(wantLeft ? point.left_url : "", shot && wantLeft)
+      + `<div class="live-meta"><strong>${esc(point.id)}</strong>距车尾 ${fmtLive(point.s)} 米<br>${esc(liveState(point.state))}</div>`
+      + photoCell(wantRight ? point.right_url : "", shot && wantRight)
+      + `<div class="live-cap">右腕</div>`;
+    box.appendChild(row);
+  });
+}
+
+async function refreshProgress() {
+  try {
+    renderProgress(await api("/api/progress"));
+  } catch (err) {
+    document.getElementById("live_summary").textContent = err.message;
+  }
+}
+
 loadConfig().then(refresh);
 setInterval(refresh, 2000);
+setInterval(refreshProgress, 400);
 </script>
 </body>
 </html>

@@ -31,8 +31,10 @@ def run(m):
         m.sweep_origin = loc.pose() if loc is not None else None
         return 0.0, 0.0, 0.0
 
-    if getattr(m, "end_on_front", False) and _past_vehicle_front(m, loc):
-        m.go_home(why="已超过车头")
+    if getattr(m, "end_on_front", False) and _past_vehicle_end(m, loc):
+        ctrl = getattr(m, "distance", None)
+        end_name = ctrl.vehicle_end_name() if ctrl is not None else "车头"
+        m.go_home(why="已超过%s" % end_name)
         return 0.0, 0.0, 0.0
 
     st = nav.status_of_ours()
@@ -102,8 +104,8 @@ def run(m):
     return 0.0, 0.0, 0.0
 
 
-def _past_vehicle_front(m, loc):
-    """模式 2：超过车头就结束。还判不了时继续扫。"""
+def _past_vehicle_end(m, loc):
+    """模式 2：走过本趟那一端就结束。车尾开始看车头，车头开始看车尾。还判不了时继续扫。"""
     ctrl = getattr(m, "distance", None)
     if ctrl is None or loc is None or not loc.ready():
         return False
@@ -113,8 +115,10 @@ def _past_vehicle_front(m, loc):
     passed = ctrl.past_vehicle_front(pose[0], pose[1])
     if passed is None:
         log.warn_throttle(
-            2.0, "[chassis_following] 车尾位置还不能判断车头，继续定时扫拍")
+            2.0, "[chassis_following] 车身位置还不能判断，继续定时扫拍")
         return False
     if passed:
-        log.info("[chassis_following] 已超过车头，结束定时扫拍并回家")
+        log.info(
+            "[chassis_following] 已超过%s，结束定时扫拍并回家",
+            ctrl.vehicle_end_name())
     return bool(passed)

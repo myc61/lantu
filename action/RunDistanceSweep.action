@@ -1,7 +1,9 @@
 # 扫拍任务。模式在 chassis_following.yaml 的 sweep_mode，上层不选。
 # sweep_mode=1 或 2 时用 task_id、vehicle_type、speed；sweep_mode=0 时这三项可空。
-# speed：车尾沿扫拍方向的速度，米/秒。接到任务时车尾位置为 0，
-# 执行中 rear_s = speed * 已执行秒数。节点不再订阅夹爪位置。
+# speed：底盘速度，米/秒。sweep_from=rear 时接到任务车尾在 0，沿行走方向增加。
+# sweep_from=front 时机器人在车头，车尾在前方。
+# 执行中 /chassis_following/set_speed data=true 把速度加载为 0。
+# 节点不再订阅夹爪位置。
 string task_id
 string vehicle_type
 float64 speed
