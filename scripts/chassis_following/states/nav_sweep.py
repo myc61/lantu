@@ -8,6 +8,8 @@ from actionlib_msgs.msg import GoalStatus
 
 
 def run(m):
+    if getattr(m, "paused", False):
+        return 0.0, 0.0, 0.0
     nav = getattr(m, "nav_client", None)
     loc = getattr(m, "map_loc", None)
     if nav is None:
@@ -24,11 +26,10 @@ def run(m):
     tol_yaw = float(m.map_arrive_tol_yaw)
 
     if not m.nav_sent:
-        nav.send_pose(hx, hy, hyaw, tol_xy, tol_yaw, label="sweep")
-        m.nav_sent = True
-        m.photo_clock_t0 = None
-        m.last_shot_stamp = None
-        m.sweep_origin = loc.pose() if loc is not None else None
+        if not m.try_begin_sweep_nav(hx, hy, hyaw, tol_xy, tol_yaw, "sweep"):
+            return 0.0, 0.0, 0.0
+        if m.sweep_origin is None and loc is not None:
+            m.sweep_origin = loc.pose()
         return 0.0, 0.0, 0.0
 
     if getattr(m, "end_on_front", False) and _past_vehicle_end(m, loc):
@@ -39,8 +40,8 @@ def run(m):
 
     st = nav.status_of_ours()
     if st is None and t >= 2.0 and t < 2.2:
-        log.warn("[chassis_following] 扫拍导航未收到 goal，重发一次")
-        nav.send_pose(hx, hy, hyaw, tol_xy, tol_yaw, label="sweep")
+        if m.send_sweep_goal(hx, hy, hyaw, tol_xy, tol_yaw, "sweep"):
+            log.warn("[chassis_following] 扫拍导航未收到 goal，重发一次")
 
     pose = loc.pose() if loc is not None else None
     if pose is not None and getattr(m, "sweep_origin", None) is None:

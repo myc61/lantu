@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>底盘扫拍</title>
+<title>岚图黄金工厂项目参数配置</title>
 <style>
   :root { color-scheme: light; --line: #d7dce3; --ink: #1c2430; --muted: #5c6b7a; --bg: #f4f6f8; --card: #fff; --accent: #0f6b4c; }
   * { box-sizing: border-box; }
@@ -52,7 +52,7 @@
 <body>
 <header>
   <div>
-    <h1>底盘扫拍配置</h1>
+    <h1>岚图黄金工厂项目参数配置</h1>
     <p>改配置后下一趟生效。模式 1、2 开扫时要带车型。</p>
   </div>
   <div class="status" id="status">正在连接…</div>
@@ -70,7 +70,8 @@
         <button id="btn_node" type="button">启动检测节点</button>
         <button id="btn_start" type="button">开始检测</button>
         <button id="btn_stop" class="warn" type="button">停止</button>
-        <button id="btn_line_stop" class="ghost" type="button">停线</button>
+        <button id="btn_line_stop" class="ghost" type="button">暂停</button>
+        <button id="btn_continue" class="ghost" type="button">继续</button>
         <button id="btn_reset" class="ghost" type="button">复位回家</button>
       </div>
       <h3>手动拍照</h3>
@@ -83,11 +84,11 @@
       <div class="grid">
         <label>通道
           <select id="light_ch">
-            <option value="1">1</option>
-            <option value="2">2</option>
+            <option value="0">0 左手</option>
+            <option value="1">1 右手</option>
           </select>
         </label>
-        <label>亮度 0–255<input id="light_bri" inputmode="numeric" value="255"/></label>
+        <label>亮度 0–230<input id="light_bri" inputmode="numeric" value="230"/></label>
       </div>
       <div class="row">
         <button id="btn_light" class="ghost" type="button">设置光源</button>
@@ -177,7 +178,7 @@
         <label>夹具偏移 米<input id="gripper_offset" inputmode="decimal"/></label>
         <label>夹具超时 秒<input id="gripper_timeout" inputmode="decimal"/></label>
         <label>定位超时 秒<input id="loc_timeout" inputmode="decimal"/></label>
-        <label>车头余量 米<input id="safety_margin" inputmode="decimal"/></label>
+        <label title="相向：home 到车头的初始距离，加在起点，检测点随之后移。同向：加在车头末端。">车头余量 米<input id="safety_margin" inputmode="decimal"/></label>
         <label>再多走 米<input id="front_extra_m" inputmode="decimal"/></label>
       </div>
       <div class="row"><button type="button" data-save="front">保存配置</button></div>
@@ -768,16 +769,27 @@ async function runAction(path, body, el) {
 
 document.getElementById("btn_node").onclick = () =>
   runAction("/api/node/start", {}, document.getElementById("run_msg"));
+function wallStamp() {
+  const d = new Date();
+  const p = (n, w = 2) => String(n).padStart(w, "0");
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate())
+    + " " + p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds())
+    + "." + p(d.getMilliseconds(), 3);
+}
+
 document.getElementById("btn_start").onclick = () =>
   runAction("/api/sweep/start", {
     task_id: val("task_id"),
     vehicle_type: val("vehicle_type"),
-    speed: val("speed")
+    speed: val("speed"),
+    clicked_at: wallStamp()
   }, document.getElementById("run_msg"));
 document.getElementById("btn_stop").onclick = () =>
   runAction("/api/sweep/stop", {}, document.getElementById("run_msg"));
 document.getElementById("btn_line_stop").onclick = () =>
-  runAction("/api/sweep/line_stop", {}, document.getElementById("run_msg"));
+  runAction("/api/sweep/pause", {}, document.getElementById("run_msg"));
+document.getElementById("btn_continue").onclick = () =>
+  runAction("/api/sweep/continue", {}, document.getElementById("run_msg"));
 document.getElementById("btn_reset").onclick = () =>
   runAction("/api/sweep/reset", {}, document.getElementById("run_msg"));
 document.getElementById("btn_cap_left").onclick = () =>
@@ -890,13 +902,17 @@ function renderProgress(data) {
   data = data || {};
   const summary = document.getElementById("live_summary");
   const vehicle = data.vehicle_type || "未开始";
-  const moving = data.active ? "进行中" : (data.vehicle_type ? "已结束" : "未开始");
-  summary.textContent = "车型 " + vehicle
+  const moving = data.paused ? "已暂停" : (
+    data.active ? "进行中" : (data.vehicle_type ? "已结束" : "未开始"));
+  let line = "车型 " + vehicle
     + " · " + moving
-    + " · " + liveState(data.state)
-    + " · 距车尾 " + fmtLive(data.from_rear_m) + " 米"
-    + " · 距车头 " + fmtLive(data.from_front_m) + " 米"
-    + " · 车身速度 " + fmtLive(data.speed) + " 米/秒";
+    + " · " + liveState(data.state);
+  if (data.state && data.state !== "IDLE") {
+    line += " · 距车尾 " + fmtLive(data.from_rear_m) + " 米"
+      + " · 距车头 " + fmtLive(data.from_front_m) + " 米";
+  }
+  line += " · 车身速度 " + fmtLive(data.speed) + " 米/秒";
+  summary.textContent = line;
   drawLiveTrack(data);
   const points = (data.points || []).filter(point => point.enabled !== false)
     .slice().sort((a, b) => Number(a.s) - Number(b.s));

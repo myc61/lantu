@@ -1,4 +1,5 @@
-# 设置某一路光源亮度。channel 1/2，brightness 0-255。
+# 设置某一路光源亮度。channel 0 左手、1 右手，brightness 0-255。
+# 报文通道都是 1。亮度超过 230 按 230 发。
 uint8 channel
 uint8 brightness
 ---

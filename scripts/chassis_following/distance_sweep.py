@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """欧式距离扫拍。导航仍去扫拍终点，拍照改成 robot_s 对齐检测点。
 
-不走定时连拍。底盘位置由速度积分得到，速度先用 goal.speed，
-/chassis_following/set_speed 收到 true 后把速度加载为 0。
+不走定时连拍。底盘位置由速度积分得到，速度先用 goal.speed。
+/chassis_following/pause 后把速度记为 0，并取消导航。
+/chassis_following/continue 再改回暂停前的速度，重新发导航。
 sweep_from=rear：机器人从车尾走向车头，和底盘同向。
 sweep_from=front：启动时机器人在车头，走向车尾，和底盘相向。
 扫完调用现有 go_home。
@@ -228,8 +229,8 @@ class DetectionPointManager(object):
 class DistanceSweep(object):
     """按底盘与机器人的相对位置对齐检测点，触发现有 trigger_photo。
 
-    速度默认用 goal.speed。停线服务收到 true 后从该时刻把速度加载为 0，
-    已经走过的位移保留。车身停住，机器人继续走，仍按相对位置触发。
+    速度默认用 goal.speed。暂停时从该时刻把速度记为 0，位移保留，
+    导航取消。继续时改回暂停前的速度，按剩余检测点接着拍。
     """
 
     def __init__(self):
@@ -250,6 +251,8 @@ class DistanceSweep(object):
         self._pose_gen = 0
         self._rear_anchor = 0.0
         self._anchor_t = None
+        self.line_paused = False
+        self._hold_speed = None
         self._speed_lock = threading.Lock()
 
     def refresh_params(self, cfg):
@@ -298,7 +301,7 @@ class DistanceSweep(object):
         return "车尾" if self.from_front else "车头"
 
     def set_speed(self, speed):
-        """替换本趟底盘速度。位置连续，扫拍不中断。未开扫时不记。"""
+        """替换本趟底盘速度。位置连续。暂停中不接受，恢复要走 continue。"""
         try:
             speed = float(speed)
         except (TypeError, ValueError):
@@ -306,6 +309,8 @@ class DistanceSweep(object):
         if not math.isfinite(speed) or speed < 0.0:
             return False, "速度必须是大于等于 0 的有限数，米/秒"
         with self._speed_lock:
+            if self.line_paused:
+                return False, "暂停中，用 /chassis_following/continue 恢复"
             if not self.active or self._anchor_t is None:
                 return False, "当前没有在按车速扫拍，速度未改"
             now = rospy.Time.now()
@@ -316,36 +321,89 @@ class DistanceSweep(object):
             self.speed = speed
         if speed == 0.0:
             log.info(
-                "[chassis_following] 停线，底盘速度 %.3f -> 0，"
-                "rear_s=%.3f 保持，按相对位置继续扫拍",
+                "[chassis_following] 底盘速度 %.3f -> 0，rear_s=%.3f 保持",
                 old, rear)
-            return True, "停线，底盘速度 0，按相对位置继续扫拍"
+            return True, "底盘速度 0，rear_s 保持"
         log.info(
             "[chassis_following] 底盘速度 %.3f -> %.3f m/s，"
             "rear_s=%.3f 保持，按相对位置继续扫拍",
             old, speed, rear)
         return True, "底盘速度改为 %.3f m/s，按相对位置继续扫拍" % speed
 
+    def pause_line(self):
+        """停线：从这一刻把底盘速度记为 0。原来的速度留给继续，rear_s 不跳。"""
+        with self._speed_lock:
+            if not self.active or self._anchor_t is None:
+                return False, "当前没有在按车速扫拍，不能暂停"
+            if self.line_paused:
+                return True, "已暂停"
+            now = rospy.Time.now()
+            rear = self._rear_unlocked(now)
+            held = float(self.speed)
+            self._hold_speed = held
+            self._rear_anchor = rear
+            self._anchor_t = now
+            self.speed = 0.0
+            self.line_paused = True
+        log.info(
+            "[chassis_following] 暂停，底盘速度 %.3f -> 0，rear_s=%.3f 保持",
+            held, rear)
+        return True, "已暂停，底盘速度 0"
+
+    def resume_line(self):
+        """继续：从当前 rear_s 起改回暂停前的速度。"""
+        with self._speed_lock:
+            if not self.active or self._anchor_t is None:
+                return False, "当前没有在按车速扫拍，不能继续"
+            if not self.line_paused or self._hold_speed is None:
+                return False, "当前没有暂停的扫拍"
+            now = rospy.Time.now()
+            rear = self._rear_unlocked(now)
+            speed = float(self._hold_speed)
+            self._rear_anchor = rear
+            self._anchor_t = now
+            self.speed = speed
+            self._hold_speed = None
+            self.line_paused = False
+        log.info(
+            "[chassis_following] 继续，底盘速度恢复为 %.3f m/s，rear_s=%.3f",
+            speed, rear)
+        return True, "已继续，底盘速度 %.3f m/s" % speed
+
+    def held_speed(self):
+        """暂停前的底盘速度。没在暂停时就是当前速度。"""
+        with self._speed_lock:
+            if self._hold_speed is not None:
+                return float(self._hold_speed)
+            return float(self.speed)
+
     def finish(self):
-        """本趟扫拍结束。之后 set_speed 不再改这一趟。"""
+        """本趟扫拍结束。之后暂停和改速度不再改这一趟。"""
         with self._speed_lock:
             self.active = False
+            self.line_paused = False
+            self._hold_speed = None
 
     def progress(self, m):
-        """给前端的相对位置。along 是机器人离车尾、朝车头量的距离，米。"""
+        """给前端的相对位置。along 是机器人离车尾、朝车头量的距离，米。
+
+        待命时不再算距车头、距车尾。
+        """
+        state = getattr(m, "state", "") or ""
+        standby = state == "IDLE"
         pose = None
         loc = getattr(m, "map_loc", None)
         if loc is not None and loc.ready():
             pose = loc.pose()
         robot_s = None
-        if pose is not None:
+        if pose is not None and not standby:
             robot_s = self.robot.get_robot_s(pose[0], pose[1])
-        rear = self.rear_s()
+        rear = None if standby else self.rear_s()
         length = None
         if self.vehicle is not None:
             length = float(self.vehicle.length)
         along = None
-        if robot_s is not None and rear is not None:
+        if not standby and robot_s is not None and rear is not None:
             if self.from_front:
                 along = float(rear) - float(robot_s)
             else:
@@ -372,12 +430,13 @@ class DistanceSweep(object):
         folder = getattr(m, "run_dir", None) or ""
         return {
             "active": bool(self.active),
-            "state": getattr(m, "state", "") or "",
+            "state": state,
             "vehicle_type": self.vehicle.vehicle_type if self.vehicle else "",
             "task_id": self.task_id or "",
             "sweep_from": self.sweep_from or "rear",
             "length": length,
             "speed": None if self._anchor_t is None else float(self.speed),
+            "paused": bool(self.line_paused),
             "robot_s": robot_s,
             "rear_s": rear,
             "from_rear_m": along,
@@ -388,14 +447,22 @@ class DistanceSweep(object):
 
     def begin(self, task_id, vehicle_type, start_x, start_y, speed, received_at):
         """加载车型并记下本趟起点、底盘速度和接到任务的时刻。失败时不改状态机。"""
+        mark = getattr(self, "mark_task", None)
+
+        def tick(stage):
+            if mark is not None:
+                mark(stage)
+
         vehicle_type = (vehicle_type or "").strip()
         if not vehicle_type:
             return False, "未提供车型"
         path = self.models.config_path
+        tick("开始读车型配置")
         try:
             self.models.load()
         except Exception as e:
             return False, "读车型配置失败 %s: %s" % (path, e)
+        tick("车型配置已读入")
         if not self.models.has_vehicle(vehicle_type):
             return False, "未知车型 %s" % vehicle_type
         try:
@@ -403,6 +470,7 @@ class DistanceSweep(object):
             sweep_from = parse_sweep_from(self.sweep_from)
         except Exception as e:
             return False, "车型 %s 配置无效: %s" % (vehicle_type, e)
+        tick("车型配置已解析")
         try:
             speed = float(speed)
         except (TypeError, ValueError):
@@ -420,17 +488,29 @@ class DistanceSweep(object):
             self.speed = speed
             self.t0 = received_at
             self._anchor_t = received_at
-            self._rear_anchor = float(vehicle.length) if from_front else 0.0
+            # 相向：safety_margin 是 home 到车头的初始距离，车尾锚点从车头再量车长。
+            # 同向：接到任务时车尾就在起点，余量留到超过车头时再加。
+            if from_front:
+                self._rear_anchor = float(vehicle.length) + float(self.safety_margin)
+            else:
+                self._rear_anchor = 0.0
             self.active = True
+            self.line_paused = False
+            self._hold_speed = None
             self._pose_gen += 1
+        tick("检测点已生成")
         self.robot.set_start_pose(start_x, start_y)
+        tick("车型任务已记下起点和速度")
         where = "车头" if from_front else "车尾"
         toward = "车尾" if from_front else "车头"
         log.info(
             "[chassis_following] 车型任务 %s 车型 %s 起点 map=(%.3f, %.3f) "
-            "从%s走向%s 底盘速度 %.3f m/s 检测点 %d 个",
+            "从%s走向%s 底盘速度 %.3f m/s 检测点 %d 个"
+            " 车头余量 %.3f m%s",
             self.task_id or "-", vehicle_type, start_x, start_y,
-            where, toward, self.speed, len(vehicle.detection_points))
+            where, toward, self.speed, len(vehicle.detection_points),
+            self.safety_margin,
+            "，加在起点" if from_front else "，加在车头末端")
         return True, "开始扫拍，从%s走向%s" % (where, toward)
 
     def pose_at_start(self, m):
@@ -488,10 +568,26 @@ class DistanceSweep(object):
         except Exception as e:
             log.warn("[chassis_following] 全身姿态 %s 失败: %s", why, e)
 
+    def _finish_line(self, rear):
+        """结束线，以及日志里的车端位置。
+
+        相向：车头余量已经加进起点，车尾锚点含这段距离，末端只再加 front_extra_m。
+        同向：车头余量和再多走都加在车头末端。
+        """
+        rear = float(rear)
+        if self.from_front:
+            end = rear
+            extra = float(self.front_extra_m)
+        else:
+            end = self.front_s(rear)
+            extra = float(self.safety_margin) + float(self.front_extra_m)
+        return end + extra, end
+
     def past_vehicle_front(self, map_x, map_y):
         """机器人走过本趟终点那一端时为 True。车尾起点还没有时返回 None。
 
-        rear：超过车头。front：超过车尾。两端都再加 safety_margin 和 front_extra_m。
+        rear：超过车头，车头余量和再多走都加在末端。
+        front：超过车尾。车头余量已在起点，末端只加再多走。
         """
         if self.vehicle is None or not self.robot.initialized():
             return None
@@ -499,19 +595,20 @@ class DistanceSweep(object):
         rear = self.rear_s()
         if robot_s is None or rear is None:
             return None
-        if self.from_front:
-            limit = float(rear)
-        else:
-            limit = self.front_s(rear)
-        return robot_s > limit + self.safety_margin + self.front_extra_m
+        finish, _end = self._finish_line(rear)
+        return robot_s > finish
 
     def run(self, m):
+        if getattr(m, "paused", False):
+            return
         if not self._advance_nav(m):
             return
         self._maybe_capture(m)
 
     def _advance_nav(self, m):
         """发扫拍终点、判到位。返回 False 表示本拍不再触发（含已经回家）。"""
+        if getattr(m, "paused", False):
+            return False
         nav = getattr(m, "nav_client", None)
         loc = getattr(m, "map_loc", None)
         if nav is None:
@@ -528,14 +625,13 @@ class DistanceSweep(object):
         tol_yaw = float(m.map_arrive_tol_yaw)
 
         if not m.nav_sent:
-            nav.send_pose(hx, hy, hyaw, tol_xy, tol_yaw, label="distance")
-            m.nav_sent = True
+            m.try_begin_sweep_nav(hx, hy, hyaw, tol_xy, tol_yaw, "distance")
             return False
 
         st = nav.status_of_ours()
         if st is None and t >= 2.0 and t < 2.2:
-            log.warn("[chassis_following] 欧式距离导航未收到 goal，重发一次")
-            nav.send_pose(hx, hy, hyaw, tol_xy, tol_yaw, label="distance")
+            if m.send_sweep_goal(hx, hy, hyaw, tol_xy, tol_yaw, "distance"):
+                log.warn("[chassis_following] 欧式距离导航未收到 goal，重发一次")
 
         pose = loc.pose() if loc is not None else None
         if pose is not None:
@@ -591,15 +687,12 @@ class DistanceSweep(object):
         if self.points.has_next():
             return
         end_name = self.vehicle_end_name()
-        if self.from_front:
-            limit = float(rear)
-        else:
-            limit = self.front_s(rear)
-        if robot_s > limit + self.safety_margin + self.front_extra_m:
+        finish, limit = self._finish_line(rear)
+        if robot_s > finish:
             log.info(
                 "[chassis_following] 检测点已完成且已超过%s "
-                "robot_s=%.3f limit_s=%.3f，导航回起点",
-                end_name, robot_s, limit)
+                "robot_s=%.3f 车端=%.3f 结束线=%.3f，导航回起点",
+                end_name, robot_s, limit, finish)
             m.go_home(why="检测点完成且已超过%s" % end_name)
 
     def _check_capture(self, m, map_x, map_y, robot_s, rear_s):

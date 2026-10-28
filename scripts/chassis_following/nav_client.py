@@ -91,3 +91,10 @@ class NavHomeClient(object):
 
     def active(self):
         return self.status_of_ours() == GoalStatus.ACTIVE
+
+    def still_running(self):
+        """这一单还在走，或取消还没落地。此时再发新目标，取消会打到新目标上。"""
+        status = self.status_of_ours()
+        return status in (
+            GoalStatus.PENDING, GoalStatus.ACTIVE,
+            GoalStatus.PREEMPTING, GoalStatus.RECALLING)

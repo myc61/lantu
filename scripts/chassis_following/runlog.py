@@ -18,9 +18,13 @@ _folder = None
 def _log_dir():
     global _folder
     if _folder is None:
+        root = None
         if rospkg is not None:
-            root = rospkg.RosPack().get_path("chassis_following")
-        else:
+            try:
+                root = rospkg.RosPack().get_path("chassis_following")
+            except Exception:
+                root = None
+        if not root:
             root = os.path.normpath(os.path.join(
                 os.path.dirname(__file__), "..", ".."))
         _folder = os.path.join(root, "logs")
@@ -34,6 +38,26 @@ def log_path(now=None):
     now = now or datetime.now()
     name = "chassis_following_%s.log" % now.strftime("%Y-%m-%d")
     return os.path.join(_log_dir(), name)
+
+
+def wall_stamp(now=None):
+    """本地墙钟，毫秒。按钮、发出动作、节点收到用同一格式。"""
+    now = now or datetime.now()
+    return now.strftime("%Y-%m-%d %H:%M:%S.") + "%03d" % (now.microsecond // 1000)
+
+
+def handoff(stage):
+    """写入 logs/task_handoff.log，并打一条带毫秒的运行日志。返回墙钟字符串。"""
+    now = datetime.now()
+    stamp = wall_stamp(now)
+    text = str(stage).replace("\n", " ").strip()
+    line = "%s %s" % (stamp, text)
+    path = os.path.join(_log_dir(), "task_handoff.log")
+    with _lock:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    log.info("[handoff] %s", line)
+    return stamp
 
 
 def _emit(level, msg, args):

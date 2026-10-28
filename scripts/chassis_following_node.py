@@ -24,7 +24,7 @@ from chassis_following.runlog import log
 import yaml
 from geometry_msgs.msg import Twist
 from std_msgs.msg import String
-from std_srvs.srv import SetBool, SetBoolResponse, Trigger, TriggerResponse
+from std_srvs.srv import Trigger, TriggerResponse
 try:
     import rospkg
 except ImportError:
@@ -132,6 +132,7 @@ class ChassisFollowingNode(object):
             self._cfg, "charge_service", "/zj_humanoid/chassis/agv_charge"))
         self._apply_yaml()
         self.distance = DistanceSweep()
+        self.distance.mark_task = self.machine.mark_task
         self.distance.refresh_params(self._cfg)
         self.machine.distance = self.distance
 
@@ -147,8 +148,10 @@ class ChassisFollowingNode(object):
             "/chassis_following/charge", Trigger, self._cb_charge)
         self._srv_end_charge = rospy.Service(
             "/chassis_following/end_charge", Trigger, self._cb_end_charge)
-        self._srv_set_speed = rospy.Service(
-            "/chassis_following/set_speed", SetBool, self._cb_set_speed)
+        self._srv_pause = rospy.Service(
+            "/chassis_following/pause", Trigger, self._cb_pause)
+        self._srv_continue = rospy.Service(
+            "/chassis_following/continue", Trigger, self._cb_continue)
         cmd_topic = _cfg_get(
             self._cfg, "cmd_vel_calib_topic", "/zj_humanoid/cmd_vel/calib")
         self._sub_cmd = rospy.Subscriber(
@@ -162,7 +165,8 @@ class ChassisFollowingNode(object):
             "复位=/chassis_following/reset "
             "充电=/chassis_following/charge "
             "结束充电=/chassis_following/end_charge "
-            "停线=/chassis_following/set_speed data:true 加载速度0")
+            "暂停=/chassis_following/pause "
+            "继续=/chassis_following/continue")
         self._timer = rospy.Timer(rospy.Duration(1.0 / rate), self._loop)
         self._purge_at = 0.0
         self._purge_thread = None
@@ -180,17 +184,27 @@ class ChassisFollowingNode(object):
         return os.path.normpath(os.path.join(
             os.path.dirname(__file__), "..", "config", "chassis_following.yaml"))
 
+    def _mark(self, stage):
+        machine = getattr(self, "machine", None)
+        if machine is not None:
+            machine.mark_task(stage)
+
     def _load_yaml(self):
         """从磁盘读配置。不写入参数服务器。"""
+        self._mark("开始读 chassis_following.yaml")
         path = self._yaml_path()
+        self._mark("已定位配置文件")
         try:
             with open(path, "r") as f:
                 self._cfg = yaml.safe_load(f) or {}
             self._yaml_mtime = os.path.getmtime(path)
         except Exception as e:
             log.error("[chassis_following] 读 yaml 失败 %s: %s", path, e)
+            self._mark("读 yaml 失败")
             return False
+        self._mark("yaml 已解析")
         self._apply_yaml()
+        self._mark("配置已写入状态机")
         return True
 
     def _apply_yaml(self):
@@ -282,10 +296,12 @@ class ChassisFollowingNode(object):
 
     def _execute_run_sweep(self, goal):
         """开扫。扫完发 feedback，回到 home 再 set_succeeded / set_aborted。"""
+        self.machine.begin_task_clock()
         self._load_yaml()
         received = rospy.Time.now()
         speed = float(goal.speed)
         mode = int(_cfg_get(self._cfg, "sweep_mode", 0))
+        self.machine.mark_task("按模式 %d 开扫" % mode)
         if mode == 0:
             ok, msg = self.machine.start_sweep("run_sweep")
         elif mode == 1:
@@ -295,14 +311,17 @@ class ChassisFollowingNode(object):
             ok, msg = self.machine.start_front_sweep(
                 goal.task_id or "", goal.vehicle_type or "", speed, received)
         else:
+            self.machine.mark_task("任务被拒绝：sweep_mode=%d 无效" % mode)
             self._as.set_aborted(self._sweep_result(
                 False,
                 "yaml sweep_mode=%d 无效（0=定时到终点，1=欧式距离，2=定时超过车头结束）"
                 % mode))
             return
         if not ok:
+            self.machine.mark_task("任务被拒绝：%s" % msg)
             self._as.set_aborted(self._sweep_result(False, msg))
             return
+        self.machine.mark_task("开扫调用已返回，等待状态机发导航")
         log.info(
             "[chassis_following] run_sweep sweep_mode=%d 已开扫，扫完发 feedback，"
             "到家再给结果\n%s",
@@ -311,6 +330,8 @@ class ChassisFollowingNode(object):
         deadline = rospy.Time.now() + rospy.Duration(timeout)
         rate = rospy.Rate(10)
         while not rospy.is_shutdown():
+            if self.machine.paused:
+                deadline = rospy.Time.now() + rospy.Duration(timeout)
             if self._as.is_preempt_requested():
                 self.machine.request_stop()
                 done, _last_ok, _shots, _run_dir, message, _state = (
@@ -404,13 +425,17 @@ class ChassisFollowingNode(object):
         self._purge_thread.daemon = True
         self._purge_thread.start()
 
-    def _cb_set_speed(self, req):
-        """停线。data 为 true 时把本趟底盘速度加载为 0，扫拍按相对位置继续。"""
-        if not req.data:
-            return SetBoolResponse(success=False, message="只有 true 才加载速度 0")
-        ok, msg = self.distance.set_speed(0.0)
-        log.info("[chassis_following] 停线 data=true success=%s %s", ok, msg)
-        return SetBoolResponse(success=ok, message=msg)
+    def _cb_pause(self, _req):
+        """暂停。底盘速度记为 0，并取消导航。本趟任务不结束。"""
+        ok, msg = self.machine.request_pause()
+        log.info("[chassis_following] 暂停 success=%s %s", ok, msg)
+        return TriggerResponse(success=ok, message=msg)
+
+    def _cb_continue(self, _req):
+        """继续。恢复暂停前的底盘速度，重新发扫拍导航，按剩余点位接着拍。"""
+        ok, msg = self.machine.request_continue()
+        log.warn("[chassis_following] 继续 success=%s %s", ok, msg)
+        return TriggerResponse(success=ok, message=msg)
 
     def _cb_stop(self, _req):
         """外部停止：调用一次就取消导航，进入 STOP_HOLD。"""
@@ -431,11 +456,12 @@ class ChassisFollowingNode(object):
         log.info_throttle(
             60.0,
             "[chassis_following] state=%s capture=%d "
-            "map_ready=%s stop=%s",
+            "map_ready=%s stop=%s paused=%s",
             self.machine.state,
             self.machine.capture_count,
             self.map_loc.ready(),
-            self.machine.stop_requested())
+            self.machine.stop_requested(),
+            self.machine.paused)
 
     def _write_progress(self):
         """把机器人和车身的相对位置写到照片目录，给配置页轮询。"""

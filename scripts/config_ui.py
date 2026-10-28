@@ -57,6 +57,21 @@ STR_KEYS = {
 SIDES = {"both", "left", "right"}
 
 
+def _handoff():
+    """直接加载 runlog.py，避免带上 ROS 依赖。"""
+    import importlib.util
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "chassis_following", "runlog.py")
+    spec = importlib.util.spec_from_file_location("chassis_following_runlog", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.handoff
+
+
+handoff = _handoff()
+
+
 def _ros_bash(script):
     """在当前环境直接调 ROS。本进程应跑在 naviai_rosbridge 里。"""
     inner = (
@@ -585,7 +600,12 @@ def _start_node():
     return True, "已启动检测节点"
 
 
-def _start_sweep(task_id, vehicle_type, speed):
+def _start_sweep(task_id, vehicle_type, speed, button_at=""):
+    clicked = re.sub(r"[\r\n]", " ", str(button_at or "")).strip()
+    stage = "前端按钮触发"
+    if clicked:
+        stage += " 浏览器点击 " + clicked[:40]
+    stamp = handoff(stage)
     up, err = _node_up()
     if not up:
         return False, err or "检测节点没在跑，先启动节点"
@@ -603,7 +623,8 @@ def _start_sweep(task_id, vehicle_type, speed):
     script = (
         "nohup rosrun chassis_following run_sweep_client.py "
         "_task_id:=\"'%s'\" _vehicle_type:=\"'%s'\" _speed:=%s "
-        "> %s 2>&1 &" % (task_id, vehicle_type, speed, SWEEP_LOG)
+        "_button_at:=\"'%s'\" "
+        "> %s 2>&1 &" % (task_id, vehicle_type, speed, stamp, SWEEP_LOG)
     )
     code, out = _run(_ros_bash(script), timeout=15)
     if code != 0:
@@ -681,8 +702,8 @@ def _set_light(channel, brightness):
         brightness = int(brightness)
     except (TypeError, ValueError):
         return False, "通道和亮度要是整数"
-    if channel not in (1, 2):
-        return False, "通道只能是 1 或 2"
+    if channel not in (0, 1):
+        return False, "通道只能是 0（左手）或 1（右手）"
     if brightness < 0 or brightness > 255:
         return False, "亮度只能是 0 到 255"
     code, out = _run(_ros_bash(
@@ -720,17 +741,6 @@ def _call_trigger(service):
     return True, out.strip()
 
 
-def _call_line_stop():
-    """停线：std_srvs/SetBool data=true，扫拍节点把本趟速度加载为 0。"""
-    code, out = _run(_ros_bash(
-        'rosservice call /chassis_following/set_speed "data: true"'), timeout=20)
-    text = (out or "").strip()
-    if code != 0:
-        return False, text or "停线调用失败"
-    ok = "success: True" in text or "success: true" in text
-    return ok, text or "已发送停线"
-
-
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         return
@@ -753,7 +763,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path in ("/", "/index.html"):
-            self._file(WEB_INDEX, "text/html; charset=utf-8")
+            self._file(WEB_INDEX, "text/html; charset=utf-8", cache=False)
             return
         if path == "/api/config":
             self._json(200, {"params": _load_params(), "vehicles": _load_vehicles()})
@@ -816,15 +826,23 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/sweep/start":
                 ok, msg = _start_sweep(
                     body.get("task_id", ""), body.get("vehicle_type", ""),
-                    body.get("speed", 0.0))
+                    body.get("speed", 0.0), body.get("clicked_at", ""))
                 self._json(200 if ok else 400, {"ok": ok, "message": msg})
                 return
             if path == "/api/sweep/stop":
                 ok, msg = _call_trigger("/chassis_following/stop")
                 self._json(200 if ok else 400, {"ok": ok, "message": msg})
                 return
-            if path == "/api/sweep/line_stop":
-                ok, msg = _call_line_stop()
+            if path == "/api/sweep/pause":
+                ok, msg = _call_trigger("/chassis_following/pause")
+                if ok:
+                    ok = "success: True" in msg or "success: true" in msg
+                self._json(200 if ok else 400, {"ok": ok, "message": msg})
+                return
+            if path == "/api/sweep/continue":
+                ok, msg = _call_trigger("/chassis_following/continue")
+                if ok:
+                    ok = "success: True" in msg or "success: true" in msg
                 self._json(200 if ok else 400, {"ok": ok, "message": msg})
                 return
             if path == "/api/sweep/reset":
@@ -852,7 +870,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200 if ok else 400, {"ok": ok, "message": msg})
                 return
             if path == "/api/light":
-                ok, msg = _set_light(body.get("channel", 1), body.get("brightness", 0))
+                ok, msg = _set_light(body.get("channel", 0), body.get("brightness", 0))
                 self._json(200 if ok else 400, {"ok": ok, "message": msg})
                 return
             if path == "/api/teach":
@@ -864,12 +882,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(404, {"ok": False, "message": "没有这个地址"})
 
-    def _file(self, path, content_type):
+    def _file(self, path, content_type, cache=True):
         with open(path, "rb") as f:
             body = f.read()
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        if not cache:
+            self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(body)
 

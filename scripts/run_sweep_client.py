@@ -15,6 +15,7 @@ sys.path[:] = [
 import actionlib
 import rospy
 from chassis_following.msg import RunDistanceSweepAction, RunDistanceSweepGoal
+from chassis_following.runlog import handoff
 
 
 def _on_feedback(fb):
@@ -30,6 +31,9 @@ def main():
     vehicle_type = str(rospy.get_param("~vehicle_type", "") or "")
     speed = float(rospy.get_param("~speed", 0.0))
     wait_s = float(rospy.get_param("~wait_server", 10.0))
+    button_at = str(rospy.get_param("~button_at", "") or "").strip().strip("'\"")
+    if button_at:
+        rospy.loginfo("[handoff] %s 前端按钮触发", button_at)
     client = actionlib.SimpleActionClient(name, RunDistanceSweepAction)
     rospy.loginfo("等待动作 %s ...", name)
     if not client.wait_for_server(rospy.Duration(wait_s)):
@@ -37,6 +41,7 @@ def main():
         sys.exit(2)
     goal = RunDistanceSweepGoal(
         task_id=task_id, vehicle_type=vehicle_type, speed=speed)
+    handoff("请求服务")
     rospy.loginfo(
         "已发送 车型=%s 车尾速度=%.3f m/s，扫完会有 feedback，到家后才有 result",
         vehicle_type or "-", speed)

@@ -63,7 +63,7 @@ rosrun chassis_following run_sweep_client.py
 | 导航 | `/zj_humanoid/navigation/navigation`（厂商 Action） |
 | 一整趟扫拍+回家 | `/chassis_following/run_sweep`（Action `RunDistanceSweep`；模式见 yaml `sweep_mode`；扫完 feedback，到家 result） |
 | 前端拍照一组 | `/chassis_following/capture`（`chassis_following/Capture`，给外部用；扫拍直接 TCP） |
-| 光源亮度 | `/chassis_following/light_control/set`（`chassis_following/SetLight`，channel 1/2，brightness 0-255） |
+| 光源亮度 | `/chassis_following/light_control/set`（`chassis_following/SetLight`，0 左手 / 1 右手，报文通道都是 1，亮度上限 230） |
 | 举手 | `/chassis_following/raise`；时间和关节角见 yaml `raise_time`、`raise_joints` |
 | 外部停止 | `/chassis_following/stop`（`std_srvs/Trigger`，`{}`：取消导航，进入 STOP_HOLD） |
 | 外部复位 | `/chassis_following/reset`（`std_srvs/Trigger`，`{}`：仅 STOP_HOLD 时回 home，到位后进 IDLE） |

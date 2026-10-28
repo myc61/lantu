@@ -3,10 +3,12 @@
 import math
 import os
 import threading
+import time
 from datetime import datetime
 
 import rospy
-from chassis_following.runlog import log
+from actionlib_msgs.msg import GoalStatus
+from chassis_following.runlog import handoff, log
 
 from chassis_following.states import charging as state_charging
 from chassis_following.states import fence_hold as state_fence
@@ -63,6 +65,9 @@ class FollowingMachine(object):
         self.last_shot_stamp = None
         self.sweep_origin = None
         self.stop_flag = False
+        self.paused = False
+        self.await_nav_settle = False
+        self._pause_started = None
         self.obstacle_zero_hold_sec = 0.3
         self._cmd_moved = False
         self._cmd_zero = False
@@ -90,8 +95,42 @@ class FollowingMachine(object):
         self.last_run_message = ""
 
         self._lock = threading.Lock()
+        self._task_lock = threading.Lock()
+        self._task_t0 = None
+        self._task_last = None
+        self._task_once = set()
         self.need_confirm = None
         self._asked = None
+
+    def begin_task_clock(self):
+        """本趟计时零点：动作回调刚收到任务。"""
+        now = time.monotonic()
+        with self._task_lock:
+            self._task_t0 = now
+            self._task_last = now
+            self._task_once = set()
+        handoff("后端收到任务")
+        log.info("[timing] +0.000s 本段 0.000s 收到任务")
+
+    def mark_task(self, stage, once=False):
+        """相对收到任务的时间。本段是距上一条计时日志的间隔。"""
+        with self._task_lock:
+            t0 = self._task_t0
+            if t0 is None:
+                return
+            if once:
+                if stage in self._task_once:
+                    return
+                self._task_once.add(stage)
+            now = time.monotonic()
+            elapsed = now - t0
+            step = now - (self._task_last if self._task_last is not None else now)
+            self._task_last = now
+        log.info("[timing] +%.3fs 本段 %.3fs %s", elapsed, step, stage)
+
+    def _reject_task(self, reason):
+        self.mark_task("开扫失败：%s" % reason)
+        return False, reason
 
     def set_plan(self, plan, plan_text):
         self.plan = plan
@@ -125,16 +164,19 @@ class FollowingMachine(object):
     def start_sweep(self, why=""):
         """车头到位：导航去扫拍终点，起步后按间隔拍照，到点再导航回家。"""
         with self._lock:
+            self.mark_task("进入定时开扫")
             if self.stop_requested() or self.state == "STOP_HOLD":
-                return False, "外部停障中，不能开扫"
+                return self._reject_task("外部停障中，不能开扫")
             if self.state != "IDLE":
-                return False, "已经在跑（%s）" % self.state
+                return self._reject_task("已经在跑（%s）" % self.state)
             loc = getattr(self, "map_loc", None)
             if loc is None or not loc.ready():
-                return False, "地图定位还没有，不能开导航扫拍"
+                return self._reject_task("地图定位还没有，不能开导航扫拍")
             if self.nav_client is None:
-                return False, "没有导航客户端"
+                return self._reject_task("没有导航客户端")
+            self.mark_task("开扫检查通过")
             self.nav_client.cancel()
+            self.mark_task("已请求取消上一段导航")
             self.need_confirm = None
             self._asked = None
             self.capture_count = 0
@@ -153,36 +195,43 @@ class FollowingMachine(object):
             self._cmd_zero_since = None
             self._reset_return = False
             self._reset_signal = False
+            self.paused = False
+            self.await_nav_settle = False
+            self._pause_started = None
             self.sweep_notes = []
             self.end_on_front = False
             self.set_plan({"mode": "nav_sweep"}, self.nav_text())
             self.state = "NAV_SWEEP"
+            self.mark_task("状态切到 NAV_SWEEP")
             log.info("[chassis_following] 开扫(%s)\n%s", why, self.plan_text)
             return True, "开始导航扫拍"
 
     def start_front_sweep(self, task_id, vehicle_type, speed, received_at):
         """定时扫拍，结束条件和欧式距离一样：超过车头就停拍并回家。"""
         with self._lock:
+            self.mark_task("进入定时开扫（超过车端结束）")
             if self.stop_requested() or self.state == "STOP_HOLD":
-                return False, "外部停障中，不能开扫"
+                return self._reject_task("外部停障中，不能开扫")
             if self.state != "IDLE":
-                return False, "已经在跑（%s）" % self.state
+                return self._reject_task("已经在跑（%s）" % self.state)
             loc = getattr(self, "map_loc", None)
             if loc is None or not loc.ready():
-                return False, "地图定位还没有，不能开导航扫拍"
+                return self._reject_task("地图定位还没有，不能开导航扫拍")
             if self.nav_client is None:
-                return False, "没有导航客户端"
+                return self._reject_task("没有导航客户端")
             ctrl = self.distance
             if ctrl is None:
-                return False, "车型任务未加载"
+                return self._reject_task("车型任务未加载")
             pose = loc.pose()
             if pose is None:
-                return False, "地图定位还没有，不能开导航扫拍"
+                return self._reject_task("地图定位还没有，不能开导航扫拍")
+            self.mark_task("开扫检查通过")
             ok, msg = ctrl.begin(
                 task_id, vehicle_type, pose[0], pose[1], speed, received_at)
             if not ok:
-                return False, msg
+                return self._reject_task(msg)
             self.nav_client.cancel()
+            self.mark_task("已请求取消上一段导航")
             self.need_confirm = None
             self._asked = None
             self.capture_count = 0
@@ -201,6 +250,9 @@ class FollowingMachine(object):
             self._cmd_zero_since = None
             self._reset_return = False
             self._reset_signal = False
+            self.paused = False
+            self.await_nav_settle = False
+            self._pause_started = None
             self.sweep_notes = []
             self.end_on_front = True
             end_name = ctrl.vehicle_end_name()
@@ -213,32 +265,36 @@ class FollowingMachine(object):
             self.set_plan({"mode": "nav_sweep"}, text)
             self.plan_text = text
             self.state = "NAV_SWEEP"
+            self.mark_task("状态切到 NAV_SWEEP")
             log.info("[chassis_following] 开扫(超过%s结束)\n%s", end_name, text)
             return True, "开始导航扫拍，超过%s结束" % end_name
 
     def start_distance_sweep(self, task_id, vehicle_type, speed, received_at):
         """欧式距离扫拍：导航去终点，按检测点窗口拍照，超过车头后再回家。"""
         with self._lock:
+            self.mark_task("进入欧式距离开扫")
             if self.stop_requested() or self.state == "STOP_HOLD":
-                return False, "外部停障中，不能开扫"
+                return self._reject_task("外部停障中，不能开扫")
             if self.state != "IDLE":
-                return False, "已经在跑（%s）" % self.state
+                return self._reject_task("已经在跑（%s）" % self.state)
             loc = getattr(self, "map_loc", None)
             if loc is None or not loc.ready():
-                return False, "地图定位还没有，不能开导航扫拍"
+                return self._reject_task("地图定位还没有，不能开导航扫拍")
             if self.nav_client is None:
-                return False, "没有导航客户端"
+                return self._reject_task("没有导航客户端")
             ctrl = self.distance
             if ctrl is None:
-                return False, "欧式距离任务未加载"
+                return self._reject_task("欧式距离任务未加载")
             pose = loc.pose()
             if pose is None:
-                return False, "地图定位还没有，不能开导航扫拍"
+                return self._reject_task("地图定位还没有，不能开导航扫拍")
+            self.mark_task("开扫检查通过")
             ok, msg = ctrl.begin(
                 task_id, vehicle_type, pose[0], pose[1], speed, received_at)
             if not ok:
-                return False, msg
+                return self._reject_task(msg)
             self.nav_client.cancel()
+            self.mark_task("已请求取消上一段导航")
             self.need_confirm = None
             self._asked = None
             self.capture_count = 0
@@ -257,6 +313,9 @@ class FollowingMachine(object):
             self._cmd_zero_since = None
             self._reset_return = False
             self._reset_signal = False
+            self.paused = False
+            self.await_nav_settle = False
+            self._pause_started = None
             self.sweep_notes = []
             self.end_on_front = False
             end_name = ctrl.vehicle_end_name()
@@ -269,8 +328,10 @@ class FollowingMachine(object):
             self.set_plan({"mode": "nav_distance"}, text)
             self.plan_text = text
             self.state = "NAV_DISTANCE"
+            self.mark_task("状态切到 NAV_DISTANCE")
             log.info("[chassis_following] 开欧式距离扫拍\n%s", text)
             ctrl.pose_at_start(self)
+            self.mark_task("开扫姿态已安排")
             return True, msg
 
     def nav_text(self):
@@ -288,8 +349,132 @@ class FollowingMachine(object):
         if ctrl is not None:
             ctrl.finish()
 
+    def request_pause(self):
+        """停线：底盘速度记为 0，取消导航。扫拍状态和本趟任务都保持。"""
+        with self._lock:
+            if self.paused:
+                return True, "已暂停，导航已取消"
+            if self.state not in ("NAV_SWEEP", "NAV_DISTANCE"):
+                return False, "当前不在扫拍（%s），不能暂停" % self.state
+            ctrl = self.distance
+            if ctrl is None or not ctrl.active:
+                return False, "当前没有在按车速扫拍，不能暂停"
+            ok, msg = ctrl.pause_line()
+            if not ok:
+                return False, msg
+            self.paused = True
+            self.await_nav_settle = True
+            self.nav_sent = False
+            self.nav_t0 = self.now()
+            if self._pause_started is None:
+                self._pause_started = self.now()
+            self._cmd_moved = False
+            self._cmd_zero = False
+            self._cmd_zero_since = None
+            nav = self.nav_client
+        if nav is not None:
+            nav.cancel()
+        log.warn("[chassis_following] 暂停，底盘速度 0，已取消导航，本趟任务不结束")
+        return True, "已暂停，底盘速度 0，导航已取消"
+
+    def request_continue(self):
+        """继续：恢复暂停前的底盘速度，重新发原来的扫拍导航，按剩余点位接着拍。"""
+        with self._lock:
+            if not self.paused:
+                return False, "当前没有暂停"
+            if self.state not in ("NAV_SWEEP", "NAV_DISTANCE"):
+                self.paused = False
+                self._pause_started = None
+                return False, "当前不在扫拍（%s），不能继续" % self.state
+            ctrl = self.distance
+            if ctrl is None or not ctrl.line_paused:
+                return False, "当前没有暂停的扫拍"
+            now = self.now()
+            speed = float(ctrl.held_speed())
+            self.paused = False
+            self.await_nav_settle = True
+            self.nav_sent = False
+            self.nav_t0 = now
+            self._cmd_moved = False
+            self._cmd_zero = False
+            self._cmd_zero_since = None
+            nav = self.nav_client
+            if nav is not None:
+                nav.cancel()
+        log.warn(
+            "[chassis_following] 继续扫拍，底盘速度 %.3f m/s，重新导航",
+            speed)
+        return True, "已继续，按原速度 %.3f m/s 重新导航" % speed
+
+    def try_begin_sweep_nav(self, x, y, yaw, tol_xy, tol_yaw, label):
+        """发扫拍导航。暂停中不发。上一段还在取消时先等，避免取消打到新目标上。"""
+        with self._lock:
+            if self.paused or self.stop_flag or self.state not in (
+                    "NAV_SWEEP", "NAV_DISTANCE"):
+                return False
+            nav = self.nav_client
+            if nav is None:
+                return False
+            if self.await_nav_settle and nav.still_running():
+                waited = (self.now() - self.nav_t0).to_sec()
+                if waited < 2.0:
+                    self.mark_task("等待上一段导航结束再发目标", once=True)
+                    log.info_throttle(
+                        1.0,
+                        "[chassis_following] 等待上一段导航结束再继续扫拍 "
+                        "status=%s t=%.1fs",
+                        nav.status_of_ours(), waited)
+                    return False
+                log.warn(
+                    "[chassis_following] 上一段导航 %.1fs 仍未结束 status=%s，仍发扫拍",
+                    waited, nav.status_of_ours())
+            self.await_nav_settle = False
+            self._release_pause_motion()
+            self.mark_task("发送扫拍导航目标")
+            nav.send_pose(x, y, yaw, tol_xy, tol_yaw, label=label)
+            self.nav_sent = True
+            self.mark_task("扫拍导航目标已发出")
+            return True
+
+    def _release_pause_motion(self):
+        """新导航发出时才恢复车速，定时拍照不把暂停这段时间算进去。调用方已持锁。"""
+        ctrl = self.distance
+        if ctrl is not None and ctrl.line_paused:
+            ok, msg = ctrl.resume_line()
+            if not ok:
+                log.warn("[chassis_following] 恢复底盘速度失败: %s", msg)
+        if self._pause_started is None:
+            return
+        dt = (self.now() - self._pause_started).to_sec()
+        self._pause_started = None
+        if dt <= 0.0:
+            return
+        shift = rospy.Duration(dt)
+        if self.photo_clock_t0 is not None:
+            self.photo_clock_t0 = self.photo_clock_t0 + shift
+        if self.last_shot_stamp is not None:
+            self.last_shot_stamp = self.last_shot_stamp + shift
+
+    def send_sweep_goal(self, x, y, yaw, tol_xy, tol_yaw, label):
+        """重发当前扫拍目标。暂停或急停中不发。"""
+        with self._lock:
+            if self.paused or self.stop_flag or self.state not in (
+                    "NAV_SWEEP", "NAV_DISTANCE"):
+                return False
+            nav = self.nav_client
+            if nav is None:
+                return False
+            self.mark_task("重发扫拍导航目标")
+            nav.send_pose(x, y, yaw, tol_xy, tol_yaw, label=label)
+            self.nav_sent = True
+            self.mark_task("扫拍导航目标已发出")
+            return True
+
     def go_home(self, why="扫拍结束"):
         """导航回地图起点，等车头到位。扫拍阶段结束时先记下 feedback。"""
+        if self.paused and self.state in ("NAV_SWEEP", "NAV_DISTANCE"):
+            log.warn("[chassis_following] 暂停中，扫拍不结束（%s）", why)
+            return
         if self.state in ("NAV_SWEEP", "NAV_DISTANCE"):
             ok = why in (
                 "扫拍终点到位", "欧式距离导航到位",
@@ -384,6 +569,9 @@ class FollowingMachine(object):
             self.nav_sent = False
             self.nav_t0 = rospy.Time.now()
             self._reset_signal = False
+            self.paused = False
+            self.await_nav_settle = False
+            self._pause_started = None
             self.state = "NAV_CHARGE"
             log.info(
                 "[chassis_following] 开始去充电 map=(%.3f, %.3f, %.1fdeg)",
@@ -430,6 +618,11 @@ class FollowingMachine(object):
             abs(lin.x) < eps and abs(lin.y) < eps and abs(lin.z) < eps
             and abs(ang.x) < eps and abs(ang.y) < eps and abs(ang.z) < eps)
         with self._lock:
+            if self.paused:
+                self._cmd_zero = True
+                self._cmd_moved = False
+                self._cmd_zero_since = None
+                return
             self._cmd_zero = zero
             if zero:
                 if self._cmd_zero_since is None:
@@ -461,7 +654,7 @@ class FollowingMachine(object):
     def _poll_obstacle(self):
         """拍摄中速度曾非 0 又持续全 0：任务失败，随即导航回 home。到家后发复位。"""
         with self._lock:
-            if self.state not in ("NAV_SWEEP", "NAV_DISTANCE"):
+            if self.paused or self.state not in ("NAV_SWEEP", "NAV_DISTANCE"):
                 return
             if self.stop_flag or not self._cmd_moved or not self._cmd_zero:
                 return
@@ -488,6 +681,9 @@ class FollowingMachine(object):
         self.nav_sent = False
         self._reset_return = False
         self._reset_signal = False
+        self.paused = False
+        self.await_nav_settle = False
+        self._pause_started = None
         self._cmd_moved = False
         self._cmd_zero_since = None
         self.state = "STOP_HOLD"
@@ -587,10 +783,18 @@ class FollowingMachine(object):
                 n, iso, ros_t, mx, my, math.degrees(myaw),
                 os.path.basename(left_path) if left_path else "",
                 os.path.basename(right_path) if right_path else ""))
-        log.info(
-            "[chassis_following] 已触发第%d组 sides=%s %s map=(%.3f, %.3f, %.1fdeg)%s",
-            n, "+".join(sides), iso, mx, my, math.degrees(myaw),
-            "" if has_cam else " 无相机")
+        if pose is not None:
+            log.info(
+                "[chassis_following] 已触发第%d组 sides=%s %s "
+                "odom_info 机器人坐标 x=%.3f y=%.3f yaw=%.1fdeg%s",
+                n, "+".join(sides), iso, mx, my, math.degrees(myaw),
+                "" if has_cam else " 无相机")
+        else:
+            log.warn(
+                "[chassis_following] 已触发第%d组 sides=%s %s "
+                "还没有 odom_info，机器人坐标未知%s",
+                n, "+".join(sides), iso,
+                "" if has_cam else " 无相机")
         return True
 
     def raise_arms(self):
@@ -606,14 +810,45 @@ class FollowingMachine(object):
             log.error("[chassis_following] 举手失败: %s", e)
             return False
 
+    def _note_nav_status(self):
+        if self._task_t0 is None or not self.nav_sent:
+            return
+        if self.state not in ("NAV_SWEEP", "NAV_DISTANCE"):
+            return
+        nav = self.nav_client
+        if nav is None:
+            return
+        status = nav.status_of_ours()
+        if status is None:
+            return
+        names = {
+            GoalStatus.PENDING: "PENDING",
+            GoalStatus.ACTIVE: "ACTIVE",
+            GoalStatus.PREEMPTED: "PREEMPTED",
+            GoalStatus.SUCCEEDED: "SUCCEEDED",
+            GoalStatus.ABORTED: "ABORTED",
+            GoalStatus.REJECTED: "REJECTED",
+            GoalStatus.PREEMPTING: "PREEMPTING",
+            GoalStatus.RECALLING: "RECALLING",
+            GoalStatus.RECALLED: "RECALLED",
+            GoalStatus.LOST: "LOST",
+        }
+        self.mark_task(
+            "导航状态首次回报 %s" % names.get(status, str(status)), once=True)
+        if status == GoalStatus.ACTIVE:
+            self.mark_task("导航已启动", once=True)
+
     def step(self):
         self._sync_stop()
         if self.state == "IDLE":
             state_idle.run(self)
         elif self.state == "NAV_SWEEP":
-            state_sweep.run(self)
+            self.mark_task("状态机开始处理扫拍", once=True)
+            if not self.paused:
+                state_sweep.run(self)
         elif self.state == "NAV_DISTANCE":
-            if self.distance is not None:
+            self.mark_task("状态机开始处理扫拍", once=True)
+            if not self.paused and self.distance is not None:
                 self.distance.run(self)
         elif self.state == "NAV_CHARGE":
             state_charge.run(self)
@@ -623,5 +858,7 @@ class FollowingMachine(object):
             state_fence.run(self)
         elif self.state == "NAV_RETURN":
             state_nav.run(self)
-        self._poll_obstacle()
+        self._note_nav_status()
+        if not self.paused:
+            self._poll_obstacle()
         return 0.0, 0.0, 0.0

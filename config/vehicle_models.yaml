@@ -11,51 +11,86 @@ vehicle_models:
     reference:
       origin: rear
     capture_layout:
-      length: 5.4
-      fov: 1
+      length: 5.3
+      fov: 0.7
       overlap: -0.1
-      overflow_end: front
+      overflow_end: rear
     detection_points:
       - id: P01
         position:
-          s: 0.4
+          s: 0.15
         enabled: true
         capture:
-          tolerance: 0.1
+          tolerance: 0.05
           sides: both
         pose:
           t: 2
           joints: [-0.002169, -0.401076, 0.146303, 0.029182, -0.453677, 0.001582, 0.835134, -0.068151, -0.004039, -0.580863, -0.144266, 0.019355, -0.164332, 0.19907, 0.731848, 0.256316, -0.000338, 0.000343, -0.699795, -0.016496, 0.000204, 0.775769]
       - id: P02
         position:
-          s: 1.1
+          s: 0.75
         enabled: true
         capture:
-          tolerance: 0.15
+          tolerance: 0.05
           sides: both
         pose:
           t: 2
           joints: [-0.110794, -0.898397, 0.58972, 0.030176, -0.250626, 0.001798, 1.18035, -0.185685, 0.023309, -0.859125, -0.173663, 0.018851, -0.182524, 0.199046, 1.006266, 0.138499, -0.000338, 0.000336, -0.699573, -0.016388, 0.000192, 0.775787]
       - id: P03
         position:
-          s: 1.33
+          s: 1.35
         enabled: true
         capture:
-          tolerance: 0.15
+          tolerance: 0.05
           sides: both
         pose:
           t: 3
           joints: [-0.11089, -0.898421, 0.589732, 0.030224, -0.250626, 0.001762, 1.18035, -0.185685, 0.030668, -0.834246, -0.182807, 0.018576, -0.245155, 0.198639, 1.206542, 0.079655, -0.000338, 0.000336, -0.700076, -0.016143, 0.000174, 0.775781]
       - id: P04
         position:
-          s: 2.03
+          s: 1.95
         enabled: true
         capture:
-          tolerance: 0.15
+          tolerance: 0.05
           sides: both
         pose:
           t: 1
           joints: [-0.110818, -0.898445, 0.589732, 0.030212, -0.250626, 0.001822, 1.18035, -0.185685, 0.03068, -0.834246, -0.182771, 0.018588, -0.245155, 0.198567, 1.206542, 0.079655, -0.000338, 0.000336, -0.699795, -0.016167, 0.000222, 0.775757]
+      - id: P05
+        position:
+          s: 2.55
+        enabled: true
+        capture:
+          tolerance: 0.05
+          sides: both
+      - id: P06
+        position:
+          s: 3.15
+        enabled: true
+        capture:
+          tolerance: 0.05
+          sides: both
+      - id: P07
+        position:
+          s: 3.75
+        enabled: true
+        capture:
+          tolerance: 0.05
+          sides: both
+      - id: P08
+        position:
+          s: 4.35
+        enabled: true
+        capture:
+          tolerance: 0.05
+          sides: both
+      - id: P09
+        position:
+          s: 4.95
+        enabled: true
+        capture:
+          tolerance: 0.05
+          sides: both
 
   SUV_B:
     reference:
@@ -73,48 +108,3 @@ vehicle_models:
         capture:
           tolerance: 0.15
           sides: left
-
-  1:
-    reference:
-      origin: rear
-    capture_layout:
-      length: 4.5
-      fov: 1
-      overlap: -0.1
-      overflow_end: rear
-    detection_points:
-      - id: P01
-        position:
-          s: 0.5
-        enabled: true
-        capture:
-          tolerance: 0.15
-          sides: both
-      - id: P02
-        position:
-          s: 1.375
-        enabled: true
-        capture:
-          tolerance: 0.15
-          sides: both
-      - id: P03
-        position:
-          s: 2.25
-        enabled: true
-        capture:
-          tolerance: 0.15
-          sides: both
-      - id: P04
-        position:
-          s: 3.125
-        enabled: true
-        capture:
-          tolerance: 0.15
-          sides: both
-      - id: P05
-        position:
-          s: 4.2
-        enabled: true
-        capture:
-          tolerance: 0.15
-          sides: both
