@@ -29,7 +29,7 @@ docker exec naviai_rosbridge bash -lc 'source /opt/ros/noetic/setup.bash && cd /
 
 反馈和结果不是一回事：
 
-- **feedback** 表示扫拍阶段。欧式距离每拍成一组一条。三种模式在离开扫拍、进入回家时再发一条。此时还没到 `map_home`。`sweep_ok=true` 对应：`扫拍终点到位`、`欧式距离导航到位`、`检测点完成且已超过车头`、`已超过车头`、`检测点完成且已超过车尾`、`已超过车尾`。后两个只在 `sweep_from: front`。导航失败回家也会发 feedback，但 `sweep_ok=false`。
+- **feedback** 只在拍成一组时发，带 `trace_id_L` 和 `trace_id_R`。超过车头或车尾、导航到终点、导航失败、开始回家都不另发。此时人还没到 `map_home`。
 - **result** 表示回到 `map_home`。`success=true` 只表示回家到位。扫拍没拍成，只要后来回到家，result 仍可以是成功。外部 `stop` 或自身避障会立刻把本趟记成失败，action 马上以失败结束；回家还在后面走。`record_run` 发现 `trip_done` 已经为真就不再改这条失败原因。
 
 ## 状态机
@@ -59,7 +59,7 @@ CHARGING 或 NAV_CHARGE
 
 外部停止、复位、充电、结束充电、暂停、继续都是 `std_srvs/Trigger`，请求体 `{}`。暂停是 `/chassis_following/pause`：把本趟速度记为 0，取消导航，机器人停住，但不进入 `STOP_HOLD`，也不把 `run_sweep` 记成结束。继续是 `/chassis_following/continue`：改回暂停前的速度，重新发扫拍导航，按剩余检测点接着拍。没有充电话题，也没有举手服务。充电点在 yaml 的 `charge_x/y/yaw_deg`。内部打开或关闭充电仍是 `/zj_humanoid/chassis/agv_charge`（`chassis_msgs/ChargeControl`，字段 `enable`）。状态机只用 `AgvCharge`，不要从状态机再开 `ChargeClient` 那条导航客户端。`AgvCharge.enable` 会 `wait_for_service` 最多约 5 秒；它若在定时器线程或持 `_lock` 时调用，会卡住状态机。这是已知缺口，不要在修别的逻辑时把更多同步等待加进去。
 
-`go_home` 自己不拿 `_lock`，只在 `_note_sweep_done` 里拿。`_poll_obstacle` 已经持锁，并且先把状态改成 `STOP_HOLD` 再调用 `go_home`，这样不会再次进入 `_note_sweep_done` 造成同锁重入。不要在持锁段里对仍处于 `NAV_SWEEP` / `NAV_DISTANCE` 的状态调用 `go_home`。
+`go_home` 不发扫拍结束 feedback，自己也不拿 `_lock`。`_poll_obstacle` 已经持锁，并且先把状态改成 `STOP_HOLD` 再调用 `go_home`。不要在持锁段里对仍处于 `NAV_SWEEP` / `NAV_DISTANCE` 的状态调用 `go_home`。
 
 ## 三种拍摄模式
 
@@ -71,7 +71,7 @@ CHARGING 或 NAV_CHARGE
 | 1 | `NAV_DISTANCE` | `robot_s` 进入检测点窗口或穿过检测点 | 全部检测点完成且超过本趟那一端，或导航到终点，或导航失败 |
 | 2 | `NAV_SWEEP`（`end_on_front=True`） | 与模式 0 相同的定时拍照 | 走过本趟那一端，或先到 `sweep_end` |
 
-走过哪一端由 yaml `sweep_from` 决定，模式 1 和模式 2 共用，实现在 `DistanceSweep.past_vehicle_front`。模式 1 还要求检测点已经没有剩余。`robot_s` 是相对本趟起点的平面距离。车身不订阅话题，用速度积分。开扫用 `goal.speed`。进行中 `/chassis_following/pause` 从该时刻把速度记为 0，已积位移保留，并取消导航。车速要等 `/chassis_following/continue` 把新导航发出去时才改回暂停前的值。暂停期间不要把这一趟记成结束。
+走过哪一端由 yaml `sweep_from` 决定，模式 1 和模式 2 共用，实现在 `DistanceSweep.past_vehicle_front`。模式 1 还要求检测点已经没有剩余。`robot_s` 是当前位置到配置 `map_home` 的平面距离。车身不订阅话题，用速度积分。开扫用 `goal.speed`。进行中 `/chassis_following/pause` 从该时刻把速度记为 0，已积位移保留，并取消导航。车速要等 `/chassis_following/continue` 把新导航发出去时才改回暂停前的值。暂停期间不要把这一趟记成结束。
 
 `sweep_from: rear`：接到任务时机器人在车尾，`rear_s = 0`，之后 `rear_s` 沿行走方向增加。检测点按 `point.s` 从小到大，`point_s = rear_s + point.s`。结束端是车头：`robot_s > rear_s + 车长 + safety_margin + front_extra_m`。
 
@@ -111,7 +111,7 @@ CHARGING 或 NAV_CHARGE
 
 - 不要把 `sweep_mode` 加回 action goal。
 - 不要恢复 `/chassis_following/confirm`，也不要恢复充电的 `std_msgs/Bool` 话题。
-- 不要让 `run_sweep` 在扫拍结束时就 `set_succeeded`。扫完只发 feedback，到家才给 result。
+- 不要让 `run_sweep` 在扫拍结束时就 `set_succeeded`。超过车头或车尾不发 feedback，到家才给 result。拍摄过程中的 feedback 照发。
 - 不要在外部 `stop` 之后自动回家。回家只来自 `/chassis_following/reset`。
 - 不要让暂停进入 `STOP_HOLD` 或结束 `run_sweep`。暂停只取消导航并停住，继续后接着原来的检测点。
 - 不要让自身避障停在 `STOP_HOLD` 等外部 reset。它应直接回家，到家后发 `reset`。

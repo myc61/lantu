@@ -5,9 +5,12 @@ WristCameraCapture：扫拍节点直接 TCP；相机服务节点也用它。
 WristCameraClient：前端/外部 call /chassis_following/capture，扫拍不用。
 左腕 host 留空则只拍右腕。
 """
+import json
 import os
+import socket
 import sys
 import threading
+import time
 from datetime import datetime
 
 import rospy
@@ -16,8 +19,10 @@ from chassis_following.runlog import log
 def _import_qvps():
     try:
         from qvps_tcp_tester import (
-            build_request, detect_image_ext, fetch_image_http, request_check)
-        return build_request, detect_image_ext, fetch_image_http, request_check
+            DELIMITER, _drain_trailing, build_request, detect_image_ext,
+            fetch_image_http)
+        return (DELIMITER, _drain_trailing, build_request,
+                detect_image_ext, fetch_image_http)
     except ImportError:
         pass
     here = os.path.abspath(os.path.dirname(__file__))
@@ -28,8 +33,10 @@ def _import_qvps():
                 if cand not in sys.path:
                     sys.path.insert(0, cand)
                 from qvps_tcp_tester import (
-                    build_request, detect_image_ext, fetch_image_http, request_check)
-                return build_request, detect_image_ext, fetch_image_http, request_check
+                    DELIMITER, _drain_trailing, build_request, detect_image_ext,
+                    fetch_image_http)
+                return (DELIMITER, _drain_trailing, build_request,
+                        detect_image_ext, fetch_image_http)
         parent = os.path.dirname(d)
         if parent == d:
             break
@@ -37,7 +44,46 @@ def _import_qvps():
     raise ImportError("找不到 qvps_tcp_tester.py（不要改那个文件）")
 
 
-build_request, detect_image_ext, fetch_image_http, request_check = _import_qvps()
+(DELIMITER, _drain_trailing, build_request,
+ detect_image_ext, fetch_image_http) = _import_qvps()
+
+
+def new_trace_id(when=None):
+    """日期时间，只含数字和短横线，长度 22。左右腕再加固定后缀 _L / _R。"""
+    when = when or datetime.now()
+    return when.strftime("%Y%m%d-%H%M%S-%f")
+
+
+def new_trace_pair(when=None):
+    """同一时刻的左右腕追踪号。"""
+    base = new_trace_id(when)
+    return base + "_L", base + "_R"
+
+
+def _exchange(host, port, program, trace_id, timeout, on_sent=None):
+    """发出 程序号__|__trace_id，sendall 之后再回调，然后读到 \\n\\n。"""
+    payload = build_request(program, trace_id)
+    started = time.time()
+    with socket.create_connection((host, port), timeout=timeout) as sock:
+        sock.settimeout(timeout)
+        sock.sendall(payload)
+        if on_sent is not None:
+            try:
+                on_sent()
+            except Exception as e:
+                log.warn("[capture] TCP已发出，回调失败: %s", e)
+        resp = b""
+        while DELIMITER not in resp:
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("连接在响应完成前被设备关闭")
+            resp += chunk
+            if DELIMITER not in resp and time.time() - started > timeout:
+                raise socket.timeout("等待响应超时")
+        packet, after = resp.split(DELIMITER, 1)
+        result = json.loads(packet.decode("utf-8"))
+        trailing = after + _drain_trailing(sock)
+    return result, trailing
 
 
 class WristCameraCapture(object):
@@ -120,25 +166,41 @@ class WristCameraCapture(object):
                 return data
         return None
 
-    def save(self, side, path):
+    def save(self, side, path, trace_id=None, on_sent=None):
         host = self._host(side)
         if not host:
+            if on_sent is not None:
+                on_sent()
             return True
         gen = self._log_gen
         sent = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
         side_cn = "左" if side == "left" else "右"
         program = self._program(side)
         port = self._port(side)
-        body = build_request(program)
+        if not trace_id:
+            trace_l, trace_r = new_trace_pair()
+            trace_id = trace_l if side == "left" else trace_r
+        body = build_request(program, trace_id)
         log.info(
-            "[capture] %s腕拍照 %s TCP发送 host=%s:%d 请求体=%r hex=%s len=%d path=%s",
-            side_cn, sent, host, port,
+            "[capture] %s腕拍照 %s TCP发送 host=%s:%d trace_id=%s 请求体=%r hex=%s len=%d path=%s",
+            side_cn, sent, host, port, trace_id,
             body.decode("utf-8", "replace"), body.hex(), len(body),
             os.path.basename(path))
+        told = False
+
+        def tell():
+            nonlocal told
+            if told:
+                return
+            told = True
+            if on_sent is not None:
+                on_sent()
+
         try:
-            result, trailing = request_check(
-                host, port, program, timeout=self.timeout)
+            result, trailing = _exchange(
+                host, port, program, trace_id, self.timeout, on_sent=tell)
         except Exception as e:
+            tell()
             if self._logging(gen):
                 log.warn("[capture] %s腕 TCP 失败: %s",
                               "左" if side == "left" else "右", e)
@@ -179,16 +241,22 @@ class WristCameraCapture(object):
             jobs.append(("right", right_path))
         if not jobs:
             return False
-        if len(jobs) == 1:
-            return self.save(jobs[0][0], jobs[0][1])
-        ok = {side: False for side, _path in jobs}
+        trace_l, trace_r = new_trace_pair()
 
         def work(side, path):
-            ok[side] = self.save(side, path)
+            tid = trace_l if side == "left" else trace_r
+            return self.save(side, path, trace_id=tid)
+
+        if len(jobs) == 1:
+            return work(jobs[0][0], jobs[0][1])
+        ok = {side: False for side, _path in jobs}
+
+        def run(side, path):
+            ok[side] = work(side, path)
 
         threads = []
         for side, path in jobs:
-            t = threading.Thread(target=work, args=(side, path))
+            t = threading.Thread(target=run, args=(side, path))
             t.start()
             threads.append(t)
         for t in threads:
@@ -211,10 +279,12 @@ class WristCameraCapture(object):
         if not jobs:
             return False, "left_path 和 right_path 都为空", False, False, "", ""
 
+        trace_l, trace_r = new_trace_pair()
         ok = {}
 
         def work(side, path):
-            ok[side] = bool(self.save(side, path))
+            tid = trace_l if side == "left" else trace_r
+            ok[side] = bool(self.save(side, path, trace_id=tid))
 
         threads = []
         for side, path in jobs:
@@ -239,11 +309,12 @@ class WristCameraCapture(object):
             return True, "已触发，未保存图片", left_ok, right_ok, left_saved, right_saved
         return True, "拍照完成", left_ok, right_ok, left_saved, right_saved
 
-    def trigger_both(self, left_path, right_path, sides=None):
-        """立刻起后台线程发 request_check（这一刻开始曝光），不等上一张传完。
+    def trigger_both(self, left_path, right_path, sides=None,
+                     trace_id_l=None, trace_id_r=None, on_sent=None):
+        """立刻起后台线程发拍摄请求（这一刻开始曝光），不等上一张传完。
 
-        sides 缺省左右都发。传图可以叠、可以拖到回家；0.2s 节奏由扫拍时钟决定。
-        未装相机视为成功。
+        sides 缺省左右都发。左腕用 trace_id_L，右腕用 trace_id_R，后缀固定 _L / _R。
+        这一组请求都已发出（或发出失败）后调用 on_sent 一次。未装相机视为成功。
         """
         if sides is None:
             sides = ("left", "right")
@@ -254,12 +325,27 @@ class WristCameraCapture(object):
         if self.right_host and "right" in want and right_path:
             jobs.append(("right", right_path))
         if not jobs:
+            if on_sent is not None:
+                on_sent()
             return True
+        gen_l, gen_r = new_trace_pair()
+        trace_id_l = trace_id_l or gen_l
+        trace_id_r = trace_id_r or gen_r
 
         gen = self._log_gen
+        remain = [len(jobs)]
+        remain_lock = threading.Lock()
+
+        def side_sent():
+            with remain_lock:
+                remain[0] -= 1
+                fire = remain[0] == 0
+            if fire and on_sent is not None:
+                on_sent()
 
         def work(side, path):
-            ok = self.save(side, path)
+            tid = trace_id_l if side == "left" else trace_id_r
+            ok = self.save(side, path, trace_id=tid, on_sent=side_sent)
             if not self._logging(gen):
                 return
             if ok and self.save_images:

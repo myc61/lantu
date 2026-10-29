@@ -20,8 +20,9 @@ from chassis_following.runlog import handoff
 
 def _on_feedback(fb):
     rospy.loginfo(
-        "扫拍结束 feedback  sweep_ok=%s  张数=%d  目录=%s  %s",
-        fb.sweep_ok, fb.shot_count, fb.run_dir, fb.message)
+        "扫拍 feedback  sweep_ok=%s  张数=%d  trace_id_L=%s  trace_id_R=%s  目录=%s  %s",
+        fb.sweep_ok, fb.shot_count, fb.trace_id_L, fb.trace_id_R,
+        fb.run_dir, fb.message)
 
 
 def main():
@@ -53,9 +54,13 @@ def main():
         rospy.logerr("没有结果 state=%s", state)
         sys.exit(1)
     if result.success:
-        rospy.loginfo("到家成功  %s", result.message)
+        rospy.loginfo(
+            "到家成功  %s  检测点间隔均值=%.3f 米",
+            result.message, result.point_interval)
         sys.exit(0)
-    rospy.logerr("失败 state=%s  %s", state, result.message)
+    rospy.logerr(
+        "失败 state=%s  %s  检测点间隔均值=%.3f 米",
+        state, result.message, result.point_interval)
     sys.exit(1)
 
 

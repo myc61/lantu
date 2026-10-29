@@ -8,6 +8,7 @@ from datetime import datetime
 
 import rospy
 from actionlib_msgs.msg import GoalStatus
+from chassis_following.capture import new_trace_pair
 from chassis_following.runlog import handoff, log
 
 from chassis_following.states import charging as state_charging
@@ -51,6 +52,13 @@ class FollowingMachine(object):
         self.sweep_photo_delay = float(sweep_photo_delay)
         self.sweep_photo_period = float(sweep_photo_period)
         self.sweep_photo_move_m = float(sweep_photo_move_m)
+        self.charge_transform_set = False
+        self.charge_transform_x = 0.0
+        self.charge_transform_y = 0.0
+        self.charge_transform_yaw = 0.0
+        self.charge_prepare = []
+        self.charge_phase = "transform"
+        self._charge_exit = False
         self.charge_x = 0.5
         self.charge_y = 1.7
         self.charge_yaw = math.radians(90.0)
@@ -76,6 +84,8 @@ class FollowingMachine(object):
         self._obstacle_return = False
         self._reset_signal = False
         self.sweep_notes = []
+        self._shot_feedback_pending = 0
+        self._deferred_home_note = None
         self.end_on_front = False
 
         self.state = "IDLE"
@@ -85,6 +95,8 @@ class FollowingMachine(object):
         self.odom_received = False
         self.home_recorded = False
         self.capture_count = 0
+        self.last_trace_id_l = ""
+        self.last_trace_id_r = ""
         self.last_shot_x = 0.0
         self.last_shot_y = 0.0
         self.run_dir = None
@@ -199,6 +211,8 @@ class FollowingMachine(object):
             self.await_nav_settle = False
             self._pause_started = None
             self.sweep_notes = []
+            self._shot_feedback_pending = 0
+            self._deferred_home_note = None
             self.end_on_front = False
             self.set_plan({"mode": "nav_sweep"}, self.nav_text())
             self.state = "NAV_SWEEP"
@@ -227,7 +241,8 @@ class FollowingMachine(object):
                 return self._reject_task("地图定位还没有，不能开导航扫拍")
             self.mark_task("开扫检查通过")
             ok, msg = ctrl.begin(
-                task_id, vehicle_type, pose[0], pose[1], speed, received_at)
+                task_id, vehicle_type, pose[0], pose[1], speed, received_at,
+                home_x=self.map_home_x, home_y=self.map_home_y)
             if not ok:
                 return self._reject_task(msg)
             self.nav_client.cancel()
@@ -254,6 +269,8 @@ class FollowingMachine(object):
             self.await_nav_settle = False
             self._pause_started = None
             self.sweep_notes = []
+            self._shot_feedback_pending = 0
+            self._deferred_home_note = None
             self.end_on_front = True
             end_name = ctrl.vehicle_end_name()
             text = (
@@ -290,7 +307,8 @@ class FollowingMachine(object):
                 return self._reject_task("地图定位还没有，不能开导航扫拍")
             self.mark_task("开扫检查通过")
             ok, msg = ctrl.begin(
-                task_id, vehicle_type, pose[0], pose[1], speed, received_at)
+                task_id, vehicle_type, pose[0], pose[1], speed, received_at,
+                home_x=self.map_home_x, home_y=self.map_home_y)
             if not ok:
                 return self._reject_task(msg)
             self.nav_client.cancel()
@@ -317,6 +335,8 @@ class FollowingMachine(object):
             self.await_nav_settle = False
             self._pause_started = None
             self.sweep_notes = []
+            self._shot_feedback_pending = 0
+            self._deferred_home_note = None
             self.end_on_front = False
             end_name = ctrl.vehicle_end_name()
             text = (
@@ -471,16 +491,11 @@ class FollowingMachine(object):
             return True
 
     def go_home(self, why="扫拍结束"):
-        """导航回地图起点，等车头到位。扫拍阶段结束时先记下 feedback。"""
+        """导航回地图起点，等车头到位。不另发扫拍结束 feedback，只保留拍摄那几条。"""
         if self.paused and self.state in ("NAV_SWEEP", "NAV_DISTANCE"):
             log.warn("[chassis_following] 暂停中，扫拍不结束（%s）", why)
             return
         if self.state in ("NAV_SWEEP", "NAV_DISTANCE"):
-            ok = why in (
-                "扫拍终点到位", "欧式距离导航到位",
-                "检测点完成且已超过车头", "已超过车头",
-                "检测点完成且已超过车尾", "已超过车尾")
-            self._note_sweep_done(ok, why)
             self._finish_distance()
         self._hush_capture()
         if self.nav_client is None:
@@ -498,12 +513,33 @@ class FollowingMachine(object):
             why, self.map_home_x, self.map_home_y,
             math.degrees(self.map_home_yaw))
 
-    def _note_sweep_done(self, ok, message):
-        """记一条 feedback。欧式距离每拍一条，扫拍结束回家时再记一条。"""
+    def _note_sweep_done(self, ok, message, trace_id_l="", trace_id_r=""):
+        """记一条 feedback。每拍一组一条，扫拍结束回家时再记一条。
+
+        回家这条带上一组的 trace_id。拍摄那条在 TCP 请求发出后才记。
+        若回家这条来得更早，先按住，等拍摄反馈进队后再记。
+        """
         with self._lock:
-            self.sweep_notes.append((
+            item = (
                 bool(ok), message or "", int(self.capture_count),
-                self.run_dir or ""))
+                self.run_dir or "", trace_id_l or "", trace_id_r or "")
+            if self._shot_feedback_pending > 0:
+                self._deferred_home_note = item
+                return
+            self.sweep_notes.append(item)
+
+    def _finish_shot_feedback(self, note, trace_id_l, trace_id_r):
+        """TCP 请求已发出或确定发不出去之后，把左右 trace_id 放进 feedback。"""
+        with self._lock:
+            if note:
+                self.sweep_notes.append((
+                    True, note, int(self.capture_count),
+                    self.run_dir or "", trace_id_l or "", trace_id_r or ""))
+            self._shot_feedback_pending = max(0, self._shot_feedback_pending - 1)
+            if (self._shot_feedback_pending == 0
+                    and self._deferred_home_note is not None):
+                self.sweep_notes.append(self._deferred_home_note)
+                self._deferred_home_note = None
 
     def pop_sweep_notes(self):
         with self._lock:
@@ -548,7 +584,7 @@ class FollowingMachine(object):
         self.go_home(why=message or "离开充电")
 
     def start_charge(self):
-        """外部触发：从待命去充电点，到位后打开充电。"""
+        """外部触发：离开 home 的姿态，再到姿态变换点、充电姿态、准备点、后向充电。"""
         with self._lock:
             if self.stop_requested() or self.state == "STOP_HOLD":
                 return False, "外部停障中，不能充电"
@@ -559,6 +595,19 @@ class FollowingMachine(object):
                 return False, "地图定位还没有，不能去充电"
             if self.nav_client is None:
                 return False, "没有导航客户端"
+            arm = self.arm
+            if arm is None:
+                return False, "没有手臂控制器，不能去充电"
+            leave = getattr(arm, "charge_joints", None) or []
+            posed = getattr(arm, "charge_pose_joints", None) or []
+            if len(leave) != 22:
+                return False, "未配置离开 home 的姿态，未发导航"
+            if len(posed) != 22:
+                return False, "未配置充电姿态，未发导航"
+            if not getattr(self, "charge_transform_set", False):
+                return False, "未配置姿态变换点，未发导航"
+            if not getattr(self, "charge_prepare", None):
+                return False, "未配置充电准备点，未发导航"
             self.nav_client.cancel()
             self.charging = False
             self.need_confirm = None
@@ -572,27 +621,58 @@ class FollowingMachine(object):
             self.paused = False
             self.await_nav_settle = False
             self._pause_started = None
+            self.state = "CHARGE_POSE"
+        log.info("[chassis_following] 去充电前先摆离开 home 的姿态，完成前不发导航")
+        try:
+            ok = bool(arm.leave_home_pose())
+        except Exception as e:
+            ok = False
+            log.error("[chassis_following] 离开 home 的姿态失败: %s", e)
+        with self._lock:
+            if self.state != "CHARGE_POSE":
+                return False, "离开 home 的姿态期间已停止，未发导航"
+            if not ok:
+                self.state = "IDLE"
+                return False, "离开 home 的姿态失败，未发导航"
+            self.charge_phase = "transform"
+            self.nav_sent = False
+            self.nav_t0 = self.now()
             self.state = "NAV_CHARGE"
             log.info(
-                "[chassis_following] 开始去充电 map=(%.3f, %.3f, %.1fdeg)",
-                self.charge_x, self.charge_y, math.degrees(self.charge_yaw))
-            return True, "开始去充电"
+                "[chassis_following] 离开 home 的姿态完成，单点导航到姿态变换点 "
+                "map=(%.3f, %.3f, %.1fdeg)",
+                self.charge_transform_x, self.charge_transform_y,
+                math.degrees(self.charge_transform_yaw))
+            return True, "离开 home 的姿态完成，开始去姿态变换点"
 
     def end_charge(self):
-        """外部触发：关掉充电，再导航回 map_home。"""
+        """外部触发：关充电后先回准备点，再回姿态变换点，摆离开 home 的姿态，再回 home。"""
         with self._lock:
             if self.stop_requested() or self.state == "STOP_HOLD":
                 return False, "外部停障中，不能结束充电"
+            if self.state == "CHARGE_POSE":
+                self.state = "IDLE"
+                self.nav_sent = False
+                self._charge_exit = False
+                return True, "离开 home 的姿态已取消，未发导航"
             if self.state not in ("NAV_CHARGE", "CHARGING") and not self.charging:
                 return False, "当前没在充电（%s）" % self.state
             ok, msg = self.disable_charge()
             self.trip_done = False
-            self.go_home(why="结束充电")
+            self._charge_exit = True
+            self.charge_phase = "exit_prepare"
+            self.nav_sent = False
+            self.nav_t0 = self.now()
+            nav = self.nav_client
+            if nav is not None and not nav.succeeded():
+                nav.cancel()
+            self.state = "NAV_CHARGE"
+            log.info("[chassis_following] 结束充电，先导航回准备点")
             if self.charging and not ok:
                 log.warn(
-                    "[chassis_following] 关闭充电失败，仍导航回 home: %s", msg)
-                return False, "关闭充电失败，已开始导航回 home: %s" % (msg or "")
-            return True, "已关充电，导航回家"
+                    "[chassis_following] 关闭充电失败，仍按原路返回: %s", msg)
+                return False, "关闭充电失败，已开始回准备点: %s" % (msg or "")
+            return True, "已关充电，先回准备点"
 
     def reset_external(self):
         """外部复位：仅 STOP_HOLD 时导航回 home，到位后由 NAV_RETURN 进入 IDLE。"""
@@ -740,8 +820,11 @@ class FollowingMachine(object):
         log.info("[chassis_following] 本趟照片目录 %s", path)
         return path
 
-    def trigger_photo(self, sides=None):
-        """立刻触发一组。sides 缺省为左右都拍。"""
+    def trigger_photo(self, sides=None, note=""):
+        """立刻触发一组。sides 缺省为左右都拍。
+
+        note 非空时，左右腕 TCP 请求发出后把 trace_id_L、trace_id_R 记进 feedback。
+        """
         if sides is None:
             sides = ("left", "right")
         else:
@@ -750,6 +833,13 @@ class FollowingMachine(object):
         want_right = "right" in sides
         n = self.capture_count + 1
         folder = self._ensure_run_dir()
+        trace_l, trace_r = new_trace_pair()
+        if not want_left:
+            trace_l = ""
+        if not want_right:
+            trace_r = ""
+        self.last_trace_id_l = trace_l
+        self.last_trace_id_r = trace_r
         now = datetime.now()
         stamp = now.strftime("%Y%m%d-%H%M%S-%f")[:-3]
         iso = now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
@@ -766,8 +856,33 @@ class FollowingMachine(object):
         has_cam = bool(
             (want_left and self.wrist.left_host)
             or (want_right and self.wrist.right_host))
-        ok = self.wrist.trigger_both(left_path, right_path, sides)
+        self.capture_count = n
+        sent = {"done": False}
+
+        def after_send():
+            with self._lock:
+                if sent["done"]:
+                    return
+                sent["done"] = True
+            if note:
+                self._finish_shot_feedback(note, trace_l, trace_r)
+
+        if note:
+            with self._lock:
+                self._shot_feedback_pending += 1
+        try:
+            ok = self.wrist.trigger_both(
+                left_path, right_path, sides,
+                trace_id_l=trace_l or None, trace_id_r=trace_r or None,
+                on_sent=after_send if note else None)
+        except Exception:
+            if note:
+                after_send()
+            raise
         if not ok:
+            if note:
+                after_send()
+            self.capture_count = n - 1
             return False
         self.last_left_name = os.path.basename(left_path) if left_path else ""
         self.last_right_name = os.path.basename(right_path) if right_path else ""
@@ -778,24 +893,44 @@ class FollowingMachine(object):
         new_file = not os.path.isfile(log_path)
         with open(log_path, "a") as f:
             if new_file:
-                f.write("index,iso,ros_sec,map_x,map_y,map_yaw_deg,left,right\n")
-            f.write("%d,%s,%.3f,%.4f,%.4f,%.2f,%s,%s\n" % (
+                f.write(
+                    "index,iso,ros_sec,map_x,map_y,map_yaw_deg,"
+                    "left,right,trace_id_L,trace_id_R\n")
+            f.write("%d,%s,%.3f,%.4f,%.4f,%.2f,%s,%s,%s,%s\n" % (
                 n, iso, ros_t, mx, my, math.degrees(myaw),
                 os.path.basename(left_path) if left_path else "",
-                os.path.basename(right_path) if right_path else ""))
+                os.path.basename(right_path) if right_path else "",
+                trace_l, trace_r))
         if pose is not None:
             log.info(
-                "[chassis_following] 已触发第%d组 sides=%s %s "
+                "[chassis_following] 已触发第%d组 sides=%s "
+                "trace_id_L=%s trace_id_R=%s %s "
                 "odom_info 机器人坐标 x=%.3f y=%.3f yaw=%.1fdeg%s",
-                n, "+".join(sides), iso, mx, my, math.degrees(myaw),
+                n, "+".join(sides), trace_l or "-", trace_r or "-", iso,
+                mx, my, math.degrees(myaw),
                 "" if has_cam else " 无相机")
         else:
             log.warn(
-                "[chassis_following] 已触发第%d组 sides=%s %s "
+                "[chassis_following] 已触发第%d组 sides=%s "
+                "trace_id_L=%s trace_id_R=%s %s "
                 "还没有 odom_info，机器人坐标未知%s",
-                n, "+".join(sides), iso,
+                n, "+".join(sides), trace_l or "-", trace_r or "-", iso,
                 "" if has_cam else " 无相机")
         return True
+
+    def _restore_after_charge_exit(self):
+        """结束充电回到 home 之后，摆回节点启动时的任务初始姿态。"""
+        if self.state != "IDLE" or not self._charge_exit:
+            return
+        self._charge_exit = False
+        if not self.last_run_ok:
+            log.warn("[chassis_following] 结束充电回家未到位，不恢复初始姿态")
+            return
+        log.info("[chassis_following] 已回 home，恢复任务初始姿态")
+        self.state = "HOME_POSE"
+        self.raise_arms()
+        if self.state == "HOME_POSE":
+            self.state = "IDLE"
 
     def raise_arms(self):
         if self.arm is None:
@@ -850,14 +985,19 @@ class FollowingMachine(object):
             self.mark_task("状态机开始处理扫拍", once=True)
             if not self.paused and self.distance is not None:
                 self.distance.run(self)
+        elif self.state == "CHARGE_POSE":
+            pass
         elif self.state == "NAV_CHARGE":
             state_charge.run(self)
         elif self.state == "CHARGING":
             state_charging.run(self)
         elif self.state == "STOP_HOLD":
             state_fence.run(self)
+        elif self.state == "HOME_POSE":
+            pass
         elif self.state == "NAV_RETURN":
             state_nav.run(self)
+            self._restore_after_charge_exit()
         self._note_nav_status()
         if not self.paused:
             self._poll_obstacle()

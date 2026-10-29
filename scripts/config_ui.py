@@ -28,7 +28,10 @@ SHOTS_DEFAULT = os.path.join(PKG, "shots")
 SWEEP_LOG = os.path.join(PKG, "logs", "ui_sweep.log")
 LAUNCH_LOG = os.path.join(PKG, "logs", "ui_launch.log")
 PORT = int(os.environ.get("CHASSIS_UI_PORT", "8090"))
+BATTERY_TOPIC = "/zj_humanoid/robot/battery_info"
 _write_lock = threading.Lock()
+_battery_lock = threading.Lock()
+_battery = {"percentage": None, "at": 0.0}
 
 PARAM_KEYS = [
     "sweep_mode", "sweep_from",
@@ -41,6 +44,8 @@ PARAM_KEYS = [
     "qvps_timeout",
     "gripper_scale", "gripper_offset", "gripper_timeout",
     "loc_timeout", "safety_margin", "front_extra_m",
+    "charge_transform_set", "charge_transform_x", "charge_transform_y",
+    "charge_transform_yaw_deg",
     "charge_x", "charge_y", "charge_yaw_deg",
     "charge_arrive_tol_xy", "charge_arrive_tol_yaw_deg",
     "capture_dir", "save_images", "sweep_whole_body",
@@ -49,7 +54,7 @@ INT_KEYS = {
     "sweep_mode", "qvps_port", "qvps_left_port",
     "qvps_http_port", "qvps_left_http_port",
 }
-BOOL_KEYS = {"save_images", "sweep_whole_body"}
+BOOL_KEYS = {"save_images", "sweep_whole_body", "charge_transform_set"}
 STR_KEYS = {
     "qvps_right_host", "qvps_left_host", "qvps_program",
     "qvps_left_program", "capture_dir", "sweep_from",
@@ -194,6 +199,82 @@ def _save_params(params):
         if value is None or value == "":
             raise ValueError("%s 不能为空" % key)
         text = _replace_key(text, key, value)
+    tmp = CFG_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp, CFG_PATH)
+
+
+def _replace_yaml_block(text, key, replacement):
+    """换掉某个顶层键及其缩进块，不带走后面的键和注释。"""
+    lines = text.splitlines(keepends=True)
+    start = None
+    for i, line in enumerate(lines):
+        if re.match(r"^" + re.escape(key) + r":", line):
+            start = i
+            break
+    if start is None:
+        raise KeyError(key)
+    end = start + 1
+    while end < len(lines):
+        line = lines[end]
+        if line.strip() == "":
+            nxt = end + 1
+            while nxt < len(lines) and lines[nxt].strip() == "":
+                nxt += 1
+            if nxt >= len(lines) or not lines[nxt].startswith((" ", "\t")):
+                break
+            end += 1
+            continue
+        if line.startswith("#"):
+            break
+        if line.startswith((" ", "\t")):
+            end += 1
+            continue
+        break
+    block = replacement if replacement.endswith("\n") else replacement + "\n"
+    lines[start:end] = [block]
+    return "".join(lines)
+
+
+def _load_prepare():
+    data = yaml.safe_load(_read(CFG_PATH)) or {}
+    out = []
+    for item in data.get("charge_prepare_points") or []:
+        if not isinstance(item, dict):
+            continue
+        out.append({
+            "x": float(item.get("x", 0.0)),
+            "y": float(item.get("y", 0.0)),
+            "yaw_deg": float(item.get("yaw_deg", 0.0)),
+        })
+    return out
+
+
+def _save_prepare(points):
+    if not isinstance(points, list):
+        raise ValueError("充电准备点格式不对")
+    cleaned = []
+    for i, item in enumerate(points, 1):
+        if not isinstance(item, dict):
+            raise ValueError("准备点 %d 格式不对" % i)
+        try:
+            x = float(item.get("x"))
+            y = float(item.get("y"))
+            yaw = float(item.get("yaw_deg"))
+        except (TypeError, ValueError):
+            raise ValueError("准备点 %d 的坐标不能为空" % i)
+        cleaned.append((x, y, yaw))
+    if not cleaned:
+        block = "charge_prepare_points: []"
+    else:
+        rows = ["charge_prepare_points:"]
+        for x, y, yaw in cleaned:
+            rows.append("  - {x: %s, y: %s, yaw_deg: %s}" % (
+                _format_value("x", x), _format_value("y", y),
+                _format_value("yaw_deg", yaw)))
+        block = "\n".join(rows)
+    text = _replace_yaml_block(_read(CFG_PATH), "charge_prepare_points", block)
     tmp = CFG_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(text)
@@ -571,6 +652,42 @@ def _progress():
     return data
 
 
+def _read_battery_once():
+    """话题 percentage 是 0 到 1。读不到时保持上一次。"""
+    code, out = _run(
+        _ros_bash("rostopic echo -n 1 %s" % BATTERY_TOPIC), timeout=4)
+    match = re.search(r"(?m)^percentage:\s*([-+0-9.eE]+)", out or "")
+    if code != 0 or not match:
+        return
+    try:
+        value = float(match.group(1))
+    except ValueError:
+        return
+    if not math.isfinite(value):
+        return
+    with _battery_lock:
+        _battery["percentage"] = value
+        _battery["at"] = time.time()
+
+
+def _battery_loop():
+    while True:
+        try:
+            _read_battery_once()
+        except Exception as e:
+            print("读电量失败: %s" % e, flush=True)
+        time.sleep(2)
+
+
+def _battery_percent():
+    with _battery_lock:
+        value = _battery["percentage"]
+        at = _battery["at"]
+    if value is None or time.time() - at > 15:
+        return None
+    return round(value * 100.0, 1)
+
+
 def _status():
     up, err = _node_up()
     root, runs = _list_shots()
@@ -581,6 +698,7 @@ def _status():
         "sweep_log": _tail(SWEEP_LOG),
         "shots_root": root,
         "latest_run": runs[0]["name"] if runs else "",
+        "battery_percent": _battery_percent(),
     }
 
 
@@ -733,6 +851,25 @@ def _teach_mode(action, arm_type):
     return True, (out or "").strip() or ("已进入示教" if action == "enter" else "已退出示教")
 
 
+def _service_succeeded(out):
+    return re.search(r"(?m)^\s*success:\s*true\s*$", out or "", re.I) is not None
+
+
+def _arm_pose_reset():
+    """先腰回零，服务返回 success 后再放下双手。"""
+    code, out = _run(_ros_bash(
+        'rosservice call /zj_humanoid/upperlimb/go_home/waist "{}"'), timeout=60)
+    waist = (out or "").strip()
+    if code != 0 or not _service_succeeded(waist):
+        return False, waist or "腰回零失败，未放下双手"
+    code, out = _run(_ros_bash(
+        'rosservice call /zj_humanoid/upperlimb/go_down/dual_arm "{}"'), timeout=60)
+    arms = (out or "").strip()
+    if code != 0 or not _service_succeeded(arms):
+        return False, "腰已回零。双手放下失败：%s" % (arms or "调用失败")
+    return True, "腰已回零，双手已放下"
+
+
 def _call_trigger(service):
     code, out = _run(_ros_bash(
         'rosservice call %s "{}"' % service), timeout=20)
@@ -766,7 +903,11 @@ class Handler(BaseHTTPRequestHandler):
             self._file(WEB_INDEX, "text/html; charset=utf-8", cache=False)
             return
         if path == "/api/config":
-            self._json(200, {"params": _load_params(), "vehicles": _load_vehicles()})
+            self._json(200, {
+                "params": _load_params(),
+                "vehicles": _load_vehicles(),
+                "charge_prepare": _load_prepare(),
+            })
             return
         if path == "/api/status":
             self._json(200, _status())
@@ -801,6 +942,8 @@ class Handler(BaseHTTPRequestHandler):
                     if "params" in body:
                         _save_params(body["params"])
                         _push_save_images(body["params"])
+                    if "charge_prepare" in body:
+                        _save_prepare(body.get("charge_prepare") or [])
                     if "vehicles" in body:
                         _save_vehicles(body["vehicles"])
                     if "vehicle" in body:
@@ -877,6 +1020,10 @@ class Handler(BaseHTTPRequestHandler):
                 ok, msg = _teach_mode(body.get("action", ""), body.get("arm_type", 0))
                 self._json(200 if ok else 400, {"ok": ok, "message": msg})
                 return
+            if path == "/api/arm_reset":
+                ok, msg = _arm_pose_reset()
+                self._json(200 if ok else 400, {"ok": ok, "message": msg})
+                return
         except Exception as e:
             self._json(400, {"ok": False, "message": str(e)})
             return
@@ -924,6 +1071,7 @@ def _purge_loop():
 
 
 def main():
+    threading.Thread(target=_battery_loop, daemon=True).start()
     threading.Thread(target=_purge_loop, daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print("配置页面 http://127.0.0.1:%d" % PORT, flush=True)

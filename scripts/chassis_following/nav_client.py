@@ -64,6 +64,48 @@ class NavHomeClient(object):
             tag, gid, x, y, math.degrees(yaw))
         return gid
 
+    def send_waypoints(self, poses, dist_tol, yaw_tol, frame_id="map",
+                       label="nav", task_type=None):
+        """一次目标、一个任务类型，点按顺序放进 waypoints。"""
+        poses = list(poses or [])
+        if not poses:
+            log.error("[chassis_following] 导航%s没有点位，未下发", label)
+            return None
+        now = rospy.Time.now()
+        tag = (label or "nav").strip() or "nav"
+        gid = "chassis_%s_%.3f" % (tag, now.to_sec())
+        self._goal_id = gid
+        waypoints = []
+        for x, y, yaw in poses:
+            pose = Pose()
+            pose.position.x = float(x)
+            pose.position.y = float(y)
+            pose.position.z = 0.0
+            pose.orientation = _yaw_to_quat(float(yaw))
+            wp = Waypoint()
+            wp.pose = pose
+            wp.distance_tolerance = float(dist_tol)
+            wp.heading_tolerance = float(yaw_tol)
+            waypoints.append(wp)
+        msg = NavigationActionGoal()
+        msg.header.stamp = now
+        msg.header.frame_id = frame_id
+        msg.goal_id.stamp = now
+        msg.goal_id.id = gid
+        msg.goal.header.stamp = now
+        msg.goal.header.frame_id = frame_id
+        kind = TaskType.Routine if task_type is None else int(task_type)
+        msg.goal.task_type.value = kind
+        msg.goal.waypoints = waypoints
+        msg.goal.translation.enable = False
+        self._pub.publish(msg)
+        last = poses[-1]
+        log.warn(
+            "[chassis_following] 导航%s goal=%s waypoints=%d "
+            "末点=(%.3f, %.3f, yaw=%.1fdeg)",
+            tag, gid, len(waypoints), last[0], last[1], math.degrees(last[2]))
+        return gid
+
     def cancel(self):
         if not self._goal_id:
             return

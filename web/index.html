@@ -12,6 +12,7 @@
   header h1 { margin: 0; font-size: 18px; font-weight: 650; }
   header p { margin: 4px 0 0; color: #c5d0dc; font-size: 13px; }
   .status { font-size: 13px; text-align: right; }
+  .battery { font-size: 16px; font-weight: 650; margin-bottom: 2px; }
   main { display: grid; grid-template-columns: 380px 1fr; gap: 16px; padding: 16px; align-items: start; }
   section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px 16px; }
   h2 { margin: 0 0 10px; font-size: 16px; }
@@ -46,6 +47,11 @@
   figure img { width: 100%; height: 160px; object-fit: contain; background: #111; display: block; }
   figcaption { padding: 6px 8px; font-size: 12px; color: var(--muted); background: #fff; }
   pre { white-space: pre-wrap; background: #111; color: #d5dece; border-radius: 8px; padding: 10px; max-height: 160px; overflow: auto; font-size: 12px; }
+  .confirm-mask { position: fixed; inset: 0; background: rgba(18, 24, 32, .45); display: none; place-items: center; z-index: 20; }
+  .confirm-mask.show { display: grid; }
+  .confirm-box { width: min(420px, calc(100% - 32px)); background: #fff; border-radius: 10px; padding: 16px 18px 18px; }
+  .confirm-box h2 { margin-bottom: 8px; }
+  .confirm-box p { margin: 0; }
   @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -55,7 +61,10 @@
     <h1>岚图黄金工厂项目参数配置</h1>
     <p>改配置后下一趟生效。模式 1、2 开扫时要带车型。</p>
   </div>
-  <div class="status" id="status">正在连接…</div>
+  <div class="status">
+    <div class="battery" id="battery">电量 —</div>
+    <div id="status">正在连接…</div>
+  </div>
 </header>
 <main>
   <div>
@@ -109,6 +118,7 @@
       <div class="row">
         <button id="btn_teach_enter" class="ghost" type="button">进入示教</button>
         <button id="btn_teach_exit" class="ghost" type="button">退出示教</button>
+        <button id="btn_arm_reset" class="ghost" type="button">姿态复位</button>
       </div>
       <p class="msg" id="run_msg"></p>
       <pre id="sweep_log"></pre>
@@ -183,6 +193,23 @@
       </div>
       <div class="row"><button type="button" data-save="front">保存配置</button></div>
       <p class="msg" id="msg_front"></p>
+      <h3>姿态变换点</h3>
+      <p class="map-note">离开 home 的姿态完成后，单点普通导航到这里。到位后再摆充电姿态。</p>
+      <div class="grid three">
+        <label>x<input id="charge_transform_x" inputmode="decimal"/></label>
+        <label>y<input id="charge_transform_y" inputmode="decimal"/></label>
+        <label>航向 °<input id="charge_transform_yaw_deg" inputmode="decimal"/></label>
+      </div>
+      <div class="row">
+        <button id="btn_odom_transform" class="ghost" type="button">当前定位写入姿态变换点</button>
+        <label><input id="charge_transform_set" type="checkbox"/> 启用该点</label>
+      </div>
+      <h3>充电准备点</h3>
+      <p class="map-note">充电姿态完成后，下面这些点按添加顺序放进同一次普通导航的 waypoints。最后一点是准备点，然后再发后向充电。</p>
+      <div id="charge_prepare"></div>
+      <div class="row">
+        <button id="btn_odom_prepare" class="ghost" type="button">当前定位添加准备点</button>
+      </div>
       <h3>充电点</h3>
       <div class="grid three">
         <label>x<input id="charge_x" inputmode="decimal"/></label>
@@ -224,6 +251,16 @@
     </section>
   </div>
 </main>
+<div id="arm_reset_mask" class="confirm-mask">
+  <div class="confirm-box" role="dialog" aria-modal="true" aria-labelledby="arm_reset_title">
+    <h2 id="arm_reset_title">姿态复位</h2>
+    <p>确认后先让腰回零。腰回零返回成功后，再放下双手。</p>
+    <div class="row">
+      <button id="arm_reset_ok" type="button">确认</button>
+      <button id="arm_reset_cancel" class="ghost" type="button">取消</button>
+    </div>
+  </div>
+</div>
 <script>
 const PARAM_IDS = [
   "sweep_mode","sweep_from","nav_timeout","sweep_whole_body",
@@ -234,6 +271,7 @@ const PARAM_IDS = [
   "qvps_right_host","qvps_left_host","qvps_port","qvps_left_port","qvps_program","qvps_left_program","qvps_http_port","qvps_left_http_port","qvps_timeout","save_images",
   "gripper_scale","gripper_offset","gripper_timeout",
   "loc_timeout","safety_margin","front_extra_m",
+  "charge_transform_set","charge_transform_x","charge_transform_y","charge_transform_yaw_deg",
   "charge_x","charge_y","charge_yaw_deg",
   "charge_arrive_tol_xy","charge_arrive_tol_yaw_deg"
 ];
@@ -673,12 +711,20 @@ async function loadConfig() {
   const data = await api("/api/config");
   PARAM_IDS.forEach(id => setv(id, data.params[id]));
   vehicles = data.vehicles || {};
+  chargePrepare = (data.charge_prepare || []).map(p => ({
+    x: showNum(p.x), y: showNum(p.y), yaw_deg: showNum(p.yaw_deg)
+  }));
+  renderPrepare();
   renderVehicles();
 }
 
 async function refresh() {
   try {
     const st = await api("/api/status");
+    const bat = st.battery_percent == null
+      ? "电量 —"
+      : "电量 " + Number(st.battery_percent).toFixed(1) + "%";
+    document.getElementById("battery").textContent = bat;
     document.getElementById("status").textContent =
       (st.node_up ? "节点在跑" : "节点未启动") +
       (st.sweep_running ? " · 检测进行中" : "");
@@ -688,6 +734,7 @@ async function refresh() {
     renderShots();
   } catch (err) {
     document.getElementById("status").textContent = err.message;
+    document.getElementById("battery").textContent = "电量 —";
   }
 }
 
@@ -699,7 +746,8 @@ const SAVE_BLOCKS = {
   camera: ["qvps_right_host", "qvps_left_host", "qvps_port", "qvps_left_port", "qvps_program", "qvps_left_program", "qvps_http_port", "qvps_left_http_port", "qvps_timeout", "save_images"],
   front: ["gripper_scale", "gripper_offset", "gripper_timeout",
     "loc_timeout", "safety_margin", "front_extra_m"],
-  charge: ["charge_x", "charge_y", "charge_yaw_deg",
+  charge: ["charge_transform_set", "charge_transform_x", "charge_transform_y",
+    "charge_transform_yaw_deg", "charge_x", "charge_y", "charge_yaw_deg",
     "charge_arrive_tol_xy", "charge_arrive_tol_yaw_deg"]
 };
 
@@ -709,7 +757,9 @@ async function saveBlock(name) {
   try {
     const params = {};
     SAVE_BLOCKS[name].forEach(id => { params[id] = val(id); });
-    const data = await api("/api/config", {params: params});
+    const body = {params: params};
+    if (name === "charge") body.charge_prepare = collectPrepareFromDom();
+    const data = await api("/api/config", body);
     el.textContent = data.message;
   } catch (err) { el.textContent = err.message; }
 }
@@ -813,6 +863,14 @@ document.getElementById("btn_teach_exit").onclick = () =>
     action: "exit",
     arm_type: val("teach_arm")
   }, document.getElementById("run_msg"));
+document.getElementById("btn_arm_reset").onclick = () =>
+  document.getElementById("arm_reset_mask").classList.add("show");
+document.getElementById("arm_reset_cancel").onclick = () =>
+  document.getElementById("arm_reset_mask").classList.remove("show");
+document.getElementById("arm_reset_ok").onclick = () => {
+  document.getElementById("arm_reset_mask").classList.remove("show");
+  runAction("/api/arm_reset", {}, document.getElementById("run_msg"));
+};
 
 function roundNum(n, digits) {
   const p = Math.pow(10, digits);
@@ -830,7 +888,8 @@ async function writePose(ids, block) {
     el.textContent = "已填入 x=" + roundNum(pose.x, 3)
       + " y=" + roundNum(pose.y, 3)
       + " 航向=" + roundNum(pose.yaw_deg, 2) + "°。点本块「保存配置」后写入文件";
-  } catch (err) { el.textContent = err.message; }
+    return true;
+  } catch (err) { el.textContent = err.message; return false; }
 }
 
 document.getElementById("btn_odom_home").onclick = () => writePose(
@@ -839,6 +898,65 @@ document.getElementById("btn_odom_sweep").onclick = () => writePose(
   ["sweep_end_x", "sweep_end_y", "sweep_end_yaw_deg"], "nav");
 document.getElementById("btn_odom_charge").onclick = () => writePose(
   ["charge_x", "charge_y", "charge_yaw_deg"], "charge");
+document.getElementById("btn_odom_transform").onclick = async () => {
+  const ok = await writePose(
+    ["charge_transform_x", "charge_transform_y", "charge_transform_yaw_deg"], "charge");
+  if (ok) document.getElementById("charge_transform_set").checked = true;
+};
+let chargePrepare = [];
+function collectPrepareFromDom() {
+  const out = [];
+  document.querySelectorAll("#charge_prepare [data-prep]").forEach(row => {
+    out.push({
+      x: row.querySelector(".px").value,
+      y: row.querySelector(".py").value,
+      yaw_deg: row.querySelector(".pyaw").value
+    });
+  });
+  chargePrepare = out;
+  return out;
+}
+function renderPrepare() {
+  const box = document.getElementById("charge_prepare");
+  const safe = text => String(text == null ? "" : text).replace(/[&<>"]/g, ch => (
+    {"&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;"}[ch]));
+  if (!chargePrepare.length) {
+    box.innerHTML = "<p class=\"map-note\">还没有准备点</p>";
+    return;
+  }
+  box.innerHTML = chargePrepare.map((p, i) => `
+    <div class="row" data-prep="${i}">
+      <span>${i + 1}</span>
+      <label>x<input class="px" inputmode="decimal" value="${safe(p.x)}"/></label>
+      <label>y<input class="py" inputmode="decimal" value="${safe(p.y)}"/></label>
+      <label>航向 °<input class="pyaw" inputmode="decimal" value="${safe(p.yaw_deg)}"/></label>
+      <button class="prep-del ghost" type="button">删</button>
+    </div>`).join("");
+  box.querySelectorAll(".prep-del").forEach(btn => {
+    btn.onclick = () => {
+      const row = btn.closest("[data-prep]");
+      collectPrepareFromDom();
+      chargePrepare.splice(Number(row.dataset.prep), 1);
+      renderPrepare();
+    };
+  });
+}
+document.getElementById("btn_odom_prepare").onclick = async () => {
+  const el = document.getElementById("msg_charge");
+  el.textContent = "正在读定位…";
+  try {
+    const pose = await api("/api/odom", {});
+    collectPrepareFromDom();
+    chargePrepare.push({
+      x: roundNum(pose.x, 3),
+      y: roundNum(pose.y, 3),
+      yaw_deg: roundNum(pose.yaw_deg, 2)
+    });
+    renderPrepare();
+    el.textContent = "已添加准备点 " + chargePrepare.length
+      + "。点本块「保存配置」后写入文件";
+  } catch (err) { el.textContent = err.message; }
+};
 document.getElementById("run_select").onchange = renderShots;
 
 function fmtLive(n) {

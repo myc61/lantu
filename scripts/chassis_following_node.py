@@ -23,6 +23,7 @@ import rospy
 from chassis_following.runlog import log
 import yaml
 from geometry_msgs.msg import Twist
+from sensor_msgs.msg import BatteryState
 from std_msgs.msg import String
 from std_srvs.srv import Trigger, TriggerResponse
 try:
@@ -156,6 +157,12 @@ class ChassisFollowingNode(object):
             self._cfg, "cmd_vel_calib_topic", "/zj_humanoid/cmd_vel/calib")
         self._sub_cmd = rospy.Subscriber(
             cmd_topic, Twist, self._cb_cmd_calib, queue_size=1)
+        self._battery_percentage = None
+        battery_topic = _cfg_get(
+            self._cfg, "battery_topic", "/zj_humanoid/robot/battery_info")
+        self._sub_battery = rospy.Subscriber(
+            battery_topic, BatteryState, self._cb_battery, queue_size=1)
+        log.info("[chassis_following] 电量 %s", battery_topic)
         self._pub_safety = rospy.Publisher(
             "/chassis_following/safety_state", String, queue_size=1, latch=True)
         self._safety_sent = None
@@ -234,6 +241,24 @@ class ChassisFollowingNode(object):
                 _cfg_get(self._cfg, "sweep_photo_period", 0.2))
             self.machine.sweep_photo_move_m = float(
                 _cfg_get(self._cfg, "sweep_photo_move_m", 0.1))
+            self.machine.charge_transform_set = _cfg_bool(
+                self._cfg, "charge_transform_set", False)
+            self.machine.charge_transform_x = float(
+                _cfg_get(self._cfg, "charge_transform_x", 0.0))
+            self.machine.charge_transform_y = float(
+                _cfg_get(self._cfg, "charge_transform_y", 0.0))
+            self.machine.charge_transform_yaw = math.radians(float(
+                _cfg_get(self._cfg, "charge_transform_yaw_deg", 0.0)))
+            prepare = []
+            for item in self._cfg.get("charge_prepare_points") or []:
+                if not isinstance(item, dict):
+                    continue
+                prepare.append((
+                    float(item.get("x", 0.0)),
+                    float(item.get("y", 0.0)),
+                    math.radians(float(item.get("yaw_deg", 0.0))),
+                ))
+            self.machine.charge_prepare = prepare
             self.machine.charge_x = float(_cfg_get(self._cfg, "charge_x", 0.5))
             self.machine.charge_y = float(_cfg_get(self._cfg, "charge_y", 1.7))
             self.machine.charge_yaw = math.radians(float(
@@ -285,13 +310,46 @@ class ChassisFollowingNode(object):
         log.warn(
             "[chassis_following] yaml 已更新，下一趟扫拍终点/拍照间隔以当前文件为准（不用重启）")
 
-    def _on_run_finished(self):
-        log.info("[chassis_following] 本趟结束")
+    def _cb_battery(self, msg):
+        try:
+            value = float(msg.percentage)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(value):
+            return
+        self._battery_percentage = value
 
-    def _sweep_result(self, ok, message):
+    def _battery_label(self):
+        """话题里的 percentage 是 0 到 1，日志打成百分数。还没收到时为 -。"""
+        value = self._battery_percentage
+        if value is None:
+            return "-"
+        return "%.1f%%" % (value * 100.0)
+
+    def _log_status(self, force=False):
+        text = (
+            "[chassis_following] state=%s capture=%d "
+            "map_ready=%s stop=%s paused=%s percentage=%s")
+        fields = (
+            self.machine.state,
+            self.machine.capture_count,
+            self.map_loc.ready(),
+            self.machine.stop_requested(),
+            self.machine.paused,
+            self._battery_label())
+        if force:
+            log.info(text, *fields)
+        else:
+            log.info_throttle(60.0, text, *fields)
+
+    def _on_run_finished(self):
+        self._log_status(force=True)
+
+    def _sweep_result(self, ok, message, point_interval=0.0):
         result = RunDistanceSweepResult()
         result.success = bool(ok)
         result.message = message or ""
+        result.point_interval = float(point_interval)
         return result
 
     def _execute_run_sweep(self, goal):
@@ -301,6 +359,7 @@ class ChassisFollowingNode(object):
         received = rospy.Time.now()
         speed = float(goal.speed)
         mode = int(_cfg_get(self._cfg, "sweep_mode", 0))
+        point_interval = 0.0
         self.machine.mark_task("按模式 %d 开扫" % mode)
         if mode == 0:
             ok, msg = self.machine.start_sweep("run_sweep")
@@ -321,6 +380,8 @@ class ChassisFollowingNode(object):
             self.machine.mark_task("任务被拒绝：%s" % msg)
             self._as.set_aborted(self._sweep_result(False, msg))
             return
+        if mode in (1, 2):
+            point_interval = self.distance.point_interval()
         self.machine.mark_task("开扫调用已返回，等待状态机发导航")
         log.info(
             "[chassis_following] run_sweep sweep_mode=%d 已开扫，扫完发 feedback，"
@@ -337,27 +398,33 @@ class ChassisFollowingNode(object):
                 done, _last_ok, _shots, _run_dir, message, _state = (
                     self.machine.snapshot_run())
                 self._as.set_preempted(self._sweep_result(
-                    False, message if done else "动作被取消"))
+                    False, message if done else "动作被取消", point_interval))
                 return
             for note in self.machine.pop_sweep_notes():
-                sweep_ok, sweep_msg, shots, run_dir = note
+                sweep_ok, sweep_msg, shots, run_dir, trace_l, trace_r = note
                 fb = RunDistanceSweepFeedback()
                 fb.sweep_ok = bool(sweep_ok)
                 fb.message = sweep_msg
                 fb.shot_count = int(shots)
                 fb.run_dir = run_dir or ""
+                fb.trace_id_L = trace_l or ""
+                fb.trace_id_R = trace_r or ""
                 self._as.publish_feedback(fb)
                 log.info(
                     "[chassis_following] run_sweep feedback "
-                    "sweep_ok=%s shots=%d dir=%s %s",
-                    sweep_ok, shots, run_dir, sweep_msg)
+                    "sweep_ok=%s shots=%d trace_id_L=%s trace_id_R=%s dir=%s %s",
+                    sweep_ok, shots, trace_l or "", trace_r or "",
+                    run_dir, sweep_msg)
             done, last_ok, _shots, _run_dir, message, state = (
                 self.machine.snapshot_run())
             if done:
-                result = self._sweep_result(last_ok, message)
+                result = self._sweep_result(last_ok, message, point_interval)
                 log.info(
-                    "[chassis_following] run_sweep 到家结果 sweep_mode=%d success=%s %s",
-                    mode, last_ok, message)
+                    "[chassis_following] run_sweep 到家结果 sweep_mode=%d success=%s "
+                    "间隔=%s %s",
+                    mode, last_ok,
+                    "%.3f" % point_interval,
+                    message)
                 if last_ok:
                     self._as.set_succeeded(result)
                 else:
@@ -365,10 +432,11 @@ class ChassisFollowingNode(object):
                 return
             if rospy.Time.now() > deadline:
                 self._as.set_aborted(self._sweep_result(
-                    False, "run_sweep 超时（state=%s）" % state))
+                    False, "run_sweep 超时（state=%s）" % state, point_interval))
                 return
             rate.sleep()
-        self._as.set_aborted(self._sweep_result(False, "节点关闭"))
+        self._as.set_aborted(self._sweep_result(
+            False, "节点关闭", point_interval))
 
     def _cb_reset(self, _req):
         ok, msg = self.machine.reset_external()
@@ -453,15 +521,8 @@ class ChassisFollowingNode(object):
         self._publish_safety()
         if prev != "IDLE" and self.machine.state == "IDLE":
             self._on_run_finished()
-        log.info_throttle(
-            60.0,
-            "[chassis_following] state=%s capture=%d "
-            "map_ready=%s stop=%s paused=%s",
-            self.machine.state,
-            self.machine.capture_count,
-            self.map_loc.ready(),
-            self.machine.stop_requested(),
-            self.machine.paused)
+        else:
+            self._log_status()
 
     def _write_progress(self):
         """把机器人和车身的相对位置写到照片目录，给配置页轮询。"""

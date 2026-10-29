@@ -99,7 +99,7 @@ def run(m):
         dt = (m.now() - m.last_shot_stamp).to_sec()
         if dt + 1e-6 < period:
             return 0.0, 0.0, 0.0
-    if not m.trigger_photo():
+    if not m.trigger_photo(note="第%d组已拍" % (m.capture_count + 1)):
         return 0.0, 0.0, 0.0
     m.last_shot_stamp = m.now()
     return 0.0, 0.0, 0.0

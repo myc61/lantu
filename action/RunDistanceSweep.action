@@ -12,9 +12,14 @@ float64 speed
 # 回到 map_home 之后的最终结果。success 表示回家到位。
 bool success
 string message
+# 本趟车型启用检测点相邻间隔的均值，米。不足两个点、模式 0、或开扫被拒绝时为 0。
+float64 point_interval
 ---
-# 欧式距离每拍成一组发一次；三种模式在扫拍结束、开始回家时再发一次。此时还没到 home。
+# 每拍成一组发一次；三种模式在扫拍结束、开始回家时再发一次。此时还没到 home。
 bool sweep_ok
 string message
 uint32 shot_count
 string run_dir
+# 这一组 TCP 拍摄请求里的追踪号。左腕以 _L 结尾，右腕以 _R 结尾。没拍的一侧为空。开始回家的两条都为空。
+string trace_id_L
+string trace_id_R

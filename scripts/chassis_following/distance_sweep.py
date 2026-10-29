@@ -160,6 +160,12 @@ class VehicleConfigManager(object):
             detection_points=points)
 
 
+def detection_point_intervals(points):
+    """启用检测点按 s 从小到大的相邻间隔，米。"""
+    ordered = sorted(float(point.s) for point in points if point.enabled)
+    return [ordered[i + 1] - ordered[i] for i in range(len(ordered) - 1)]
+
+
 class RobotPositionManager(object):
     def __init__(self):
         self.start_x = None
@@ -173,6 +179,7 @@ class RobotPositionManager(object):
         return self.start_x is not None and self.start_y is not None
 
     def get_robot_s(self, current_x, current_y):
+        """当前位置到配置 home 点的平面距离，米。"""
         if not self.initialized():
             return None
         return math.hypot(
@@ -445,8 +452,12 @@ class DistanceSweep(object):
             "points": points,
         }
 
-    def begin(self, task_id, vehicle_type, start_x, start_y, speed, received_at):
-        """加载车型并记下本趟起点、底盘速度和接到任务的时刻。失败时不改状态机。"""
+    def begin(self, task_id, vehicle_type, start_x, start_y, speed, received_at,
+              home_x=None, home_y=None):
+        """加载车型并记下 home、底盘速度和接到任务的时刻。失败时不改状态机。
+
+        robot_s 相对配置的 home 点。start_x/y 只是开扫时的定位，用来打日志。
+        """
         mark = getattr(self, "mark_task", None)
 
         def tick(stage):
@@ -499,19 +510,35 @@ class DistanceSweep(object):
             self._hold_speed = None
             self._pose_gen += 1
         tick("检测点已生成")
-        self.robot.set_start_pose(start_x, start_y)
-        tick("车型任务已记下起点和速度")
+        origin_x = float(start_x if home_x is None else home_x)
+        origin_y = float(start_y if home_y is None else home_y)
+        self.robot.set_start_pose(origin_x, origin_y)
+        tick("车型任务已记下 home 和速度")
         where = "车头" if from_front else "车尾"
         toward = "车尾" if from_front else "车头"
+        dist_home = math.hypot(float(start_x) - origin_x, float(start_y) - origin_y)
         log.info(
-            "[chassis_following] 车型任务 %s 车型 %s 起点 map=(%.3f, %.3f) "
+            "[chassis_following] 车型任务 %s 车型 %s "
+            "欧式距离相对 home=(%.3f, %.3f) 开扫时距 home %.3f m "
+            "开扫定位 map=(%.3f, %.3f) "
             "从%s走向%s 底盘速度 %.3f m/s 检测点 %d 个"
             " 车头余量 %.3f m%s",
-            self.task_id or "-", vehicle_type, start_x, start_y,
+            self.task_id or "-", vehicle_type, origin_x, origin_y, dist_home,
+            start_x, start_y,
             where, toward, self.speed, len(vehicle.detection_points),
             self.safety_margin,
             "，加在起点" if from_front else "，加在车头末端")
         return True, "开始扫拍，从%s走向%s" % (where, toward)
+
+    def point_interval(self):
+        """本趟车型启用检测点相邻间隔的均值，米。不足两个点时为 0。"""
+        vehicle = self.vehicle
+        if vehicle is None:
+            return 0.0
+        gaps = detection_point_intervals(vehicle.detection_points)
+        if not gaps:
+            return 0.0
+        return sum(gaps) / float(len(gaps))
 
     def pose_at_start(self, m):
         """模式 1 开扫后立刻异步运动到第一个检测点的全身姿态。"""
@@ -722,7 +749,8 @@ class DistanceSweep(object):
         if not (in_window or crossed):
             return
         point.state = "TRIGGERED"
-        if not m.trigger_photo(point.capture.sides):
+        if not m.trigger_photo(
+                point.capture.sides, note="检测点 %s 已拍" % point.id):
             point.state = "WAITING"
             self.points.last_error = prev_error
             log.warn(
@@ -734,7 +762,6 @@ class DistanceSweep(object):
             m, point.id, map_x, map_y, robot_s, rear_s, point_s, error,
             point.capture.sides)
         self._schedule_pose_after_shot(m, point)
-        m._note_sweep_done(True, "检测点 %s 已拍" % point.id)
         log.info(
             "[chassis_following] 检测点 %s 已拍 sides=%s error=%.3f robot_s=%.3f point_s=%.3f",
             point.id, "+".join(point.capture.sides), error, robot_s, point_s)
@@ -756,12 +783,14 @@ class DistanceSweep(object):
                 f.write(
                     "index,task_id,vehicle_type,point_id,sides,"
                     "robot_map_x,robot_map_y,robot_s,rear_s,point_s,error,"
-                    "sweep_from\n")
-            f.write("%d,%s,%s,%s,%s,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%s\n" % (
+                    "sweep_from,trace_id_L,trace_id_R\n")
+            f.write("%d,%s,%s,%s,%s,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%s,%s,%s\n" % (
                 m.capture_count,
                 cell(self.task_id),
                 cell(self.vehicle.vehicle_type),
                 cell(point_id),
                 cell("+".join(sides)),
                 map_x, map_y, robot_s, rear_s, point_s, error,
-                cell(self.sweep_from)))
+                cell(self.sweep_from),
+                cell(getattr(m, "last_trace_id_l", "")),
+                cell(getattr(m, "last_trace_id_r", ""))))
